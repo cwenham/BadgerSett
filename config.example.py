@@ -126,6 +126,12 @@ NEWS_HEADLINES = 4              # how many to show; 4 fits comfortably
 # See "About the gas sensor" in the README before raising GAS_ALERTS.
 GAS_WARMUP_S = 300
 
+# Only run the gas channel on USB power. On battery the badge sleeps
+# between refreshes, so the heater can never stay warm long enough for
+# the reading to mean anything - and it would cost roughly seventy times
+# the badge's normal current to keep it awake. See the README.
+GAS_USB_ONLY = True
+
 GAS_ALERTS = True
 GAS_DROP_WARN = 0.60            # resistance below 60% of baseline -> warn
 GAS_DROP_SEVERE = 0.35          # below 35% of baseline -> severe

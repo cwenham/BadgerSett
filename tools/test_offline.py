@@ -168,7 +168,18 @@ def install_fakes():
             return (2026, 9, 20, 0, 17, 15, 0, 0)
 
     machine.RTC = RTC
-    machine.Pin = lambda n, *a, **kw: n
+    class _Pin:
+        IN = 0
+        OUT = 1
+        usb_present = 1          # tests flip this to simulate battery
+
+        def __init__(self, name, mode=None, *a, **kw):
+            self.name = name
+
+        def value(self, v=None):
+            return _Pin.usb_present if self.name == "WL_GPIO2" else 0
+
+    machine.Pin = _Pin
     machine.I2C = lambda *a, **kw: FakeI2C()
     sys.modules["machine"] = machine
 
@@ -268,6 +279,7 @@ def install_fakes():
     cfg.NEWS_FEED = "top"
     cfg.NEWS_HEADLINES = 4
     cfg.GAS_WARMUP_S = 300
+    cfg.GAS_USB_ONLY = True
     cfg.GAS_ALERTS = True
     cfg.GAS_DROP_WARN, cfg.GAS_DROP_SEVERE = 0.60, 0.35
     cfg.GAS_BASELINE_SAMPLES = 20
@@ -1002,6 +1014,48 @@ def test_gas_warmup_gate():
     check("the screen says 'warming', not an air-quality verdict",
           "warming" in drawn and "clean" not in drawn, drawn[-80:])
 
+    # On battery the heater is not run at all.
+    battery = bme.read(samples=2, settle=0, warmup=300, gas_enabled=False)
+    check("on battery the gas reading is refused outright",
+          battery["gas"] is None and battery["gas_reason"] == "usb only",
+          (battery["gas"], battery["gas_reason"]))
+    check("...even once the heater would have been warm enough",
+          bme.read(samples=2, settle=0, warmup=0, gas_enabled=False)["gas"] is None)
+    check("temperature still works on battery", battery["temp_c"] == 22.4)
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, battery, st, [],
+                                       {"updated": "u", "online": True, "muted": False,
+                                        "sensor": True, "view": 1, "credit": "c"})
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("the screen explains gas is USB-only on battery",
+          "usb only" in drawn.lower(), drawn[-70:])
+
+
+def test_power_detection():
+    print("\npower source detection")
+    from badgersett import power
+    machine_mod = sys.modules["machine"]
+
+    machine_mod.Pin.usb_present = 1
+    check("USB detected when VBUS is high", power.on_usb() is True)
+    machine_mod.Pin.usb_present = 0
+    check("battery detected when VBUS is low", power.on_usb() is False)
+    machine_mod.Pin.usb_present = 1
+
+    broken = machine_mod.Pin
+
+    class Exploding:
+        IN = 0
+
+        def __init__(self, *a, **kw):
+            raise RuntimeError("no such pin")
+
+    machine_mod.Pin = Exploding
+    check("an unreadable VBUS pin assumes USB rather than crashing",
+          power.on_usb() is True)
+    machine_mod.Pin = broken
+
 
 def test_buttons():
     print("\nbutton mapping and the secret chord")
@@ -1172,6 +1226,7 @@ def main():
     test_news()
     test_wrap()
     test_gas_warmup_gate()
+    test_power_detection()
     test_buttons()
     test_layouts()
     test_app_cycle()

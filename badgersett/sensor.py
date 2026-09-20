@@ -67,7 +67,7 @@ class Sensor:
         """How long the gas heater has been running this power-on."""
         return time.ticks_diff(time.ticks_ms(), self.heater_started) / 1000.0
 
-    def read(self, samples=4, settle=0.35, warmup=None):
+    def read(self, samples=4, settle=0.35, warmup=None, gas_enabled=True):
         """Return a reading dict, or None if the sensor is unavailable.
 
         Early samples are discarded: the first conversion after power-up
@@ -100,7 +100,17 @@ class Sensor:
         temperature, pressure, humidity, gas, status = last[0], last[1], last[2], last[3], last[4]
         stable = bool(status & STATUS_HEATER_STABLE)
         warm = self.warm_seconds()
-        trusted = stable and warm >= warmup
+        if not gas_enabled:
+            # On battery the badge sleeps between refreshes, so the heater
+            # never accumulates enough continuous running for the reading
+            # to mean anything. Do not pretend otherwise.
+            trusted, reason = False, "usb only"
+        elif not stable:
+            trusted, reason = False, "unstable"
+        elif warm < warmup:
+            trusted, reason = False, "warming %ds" % round(warm)
+        else:
+            trusted, reason = True, "ok"
 
         reading = {
             "temp_c": temperature,
@@ -113,12 +123,12 @@ class Sensor:
             "stable": stable,
             "gas_warm_s": warm,
             "gas_trusted": trusted,
+            "gas_reason": reason,
             "dew_c": util.dew_point(temperature, humidity),
         }
         reading["dew"] = util.c_to_display(reading["dew_c"])
-        util.log("BME688:", "%.1fC %.0f%% %.1fhPa gas=%s (%s, warm %.0fs)" % (
-            temperature, humidity, reading["pressure"] or 0, gas,
-            "trusted" if trusted else "warming", warm))
+        util.log("BME688:", "%.1fC %.0f%% %.1fhPa gas=%s (%s)" % (
+            temperature, humidity, reading["pressure"] or 0, gas, reason))
         return reading
 
     @staticmethod

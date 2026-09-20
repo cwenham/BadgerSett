@@ -19,7 +19,7 @@ import machine
 import config
 
 from . import alerts as alert_rules
-from . import metoffice, net, news, nws, sensor, ui, util, weather as weather_api
+from . import metoffice, net, news, nws, power, sensor, ui, util, weather as weather_api
 from .haptics import Haptics
 from .sensor import Sensor
 from .state import State
@@ -199,7 +199,9 @@ def run():
         state.set("view", view)
 
         # -- sensor: cheap, so always read ------------------------------
-        indoor = bme.read() if (bme and bme.ok) else None
+        # The gas heater is only worth running where it can stay warm.
+        gas_ok = power.on_usb() or not getattr(config, "GAS_USB_ONLY", True)
+        indoor = bme.read(gas_enabled=gas_ok) if (bme and bme.ok) else None
         if indoor:
             state.update_gas_baseline(indoor.get("gas"),
                                       getattr(config, "GAS_BASELINE_SAMPLES", 20))

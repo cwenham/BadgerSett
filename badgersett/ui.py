@@ -325,9 +325,9 @@ class UI:
             if gas:
                 rows.append("Gas %.1f k" % (gas / 1000.0))
                 if not indoor.get("gas_trusted"):
-                    # Mid burn-in: the number is real but means nothing yet,
-                    # so say so rather than inventing an air-quality verdict.
-                    rows.append("Air  warming %ds" % round(indoor.get("gas_warm_s") or 0))
+                    # The number is real but means nothing yet, so say why
+                    # rather than inventing an air-quality verdict.
+                    rows.append("Air  %s" % (indoor.get("gas_reason") or "warming"))
                 elif baseline:
                     ratio = gas / baseline
                     if ratio >= 0.85:
