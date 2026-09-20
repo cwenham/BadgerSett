@@ -223,9 +223,29 @@ monoxide, natural gas, or smoke, and it must never be relied on for any
 of them. Fit a proper certified CO alarm and smoke alarm. Treat the badge
 as "something changed in here, go look."
 
-Readings also need a few minutes of running before they settle, and the
-heater warms the sensor, so indoor temperature typically reads a degree
-or two high — mount the breakout away from the board if that bothers you.
+### The gas channel does not work on battery
+
+Measured on real hardware: from a cold start the BME688 reports an
+implausibly high resistance, collapses, then **climbs for minutes** —
+still rising 3–4% per 15 seconds after three full minutes. The heater
+has to run continuously before the number means anything.
+
+A badge that wakes, reads and powers down samples the same point of the
+same repeatable burn-in curve every time. Early builds of this project
+returned a byte-identical 5684.846 ohms on every cycle for hours, which
+looked like a working sensor and was nothing of the kind.
+
+So `GAS_WARMUP_S` (default 300) gates it: until the heater has run that
+long, `gas` is withheld, the baseline does not learn, no gas alert can
+fire, and the detail view says `Air warming 12s` instead of inventing a
+verdict. In practice **the gas channel only works on USB power**, where
+the badge stays awake.
+
+Temperature, humidity and pressure are unaffected — they are valid
+immediately and are the readings worth trusting.
+
+The heater also warms the package, so indoor temperature reads a degree
+or two high; mount the breakout away from the board if that bothers you.
 
 ## Power
 

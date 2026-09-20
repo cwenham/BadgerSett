@@ -34,6 +34,9 @@ class Sensor:
         self.address = address
         self.device = None
         self.error = None
+        # The gas heater starts when the device is configured. Everything
+        # about the gas channel is measured from this moment.
+        self.heater_started = time.ticks_ms()
         if not AVAILABLE:
             self.error = "no breakout_bme68x in firmware"
             return
@@ -60,12 +63,27 @@ class Sensor:
     def ok(self):
         return self.device is not None
 
-    def read(self, samples=4, settle=0.35):
+    def warm_seconds(self):
+        """How long the gas heater has been running this power-on."""
+        return time.ticks_diff(time.ticks_ms(), self.heater_started) / 1000.0
+
+    def read(self, samples=4, settle=0.35, warmup=None):
         """Return a reading dict, or None if the sensor is unavailable.
 
         Early samples are discarded: the first conversion after power-up
         reports a warm, dry, low-resistance lie while the heater spins up.
+
+        The gas channel needs far longer than that. From cold the BME688
+        reads implausibly high, collapses, then climbs for many minutes -
+        still rising 3-4% per 15s after three minutes in testing. So
+        `gas` is only populated once the heater has been running for
+        `warmup` seconds; before that it is None and nothing downstream
+        (baseline, alerts, the air-quality verdict) will use it.
+        `gas_raw` is always present for display.
         """
+        if warmup is None:
+            import config
+            warmup = getattr(config, "GAS_WARMUP_S", 300)
         if not self.ok:
             return None
 
@@ -81,6 +99,8 @@ class Sensor:
 
         temperature, pressure, humidity, gas, status = last[0], last[1], last[2], last[3], last[4]
         stable = bool(status & STATUS_HEATER_STABLE)
+        warm = self.warm_seconds()
+        trusted = stable and warm >= warmup
 
         reading = {
             "temp_c": temperature,
@@ -88,14 +108,17 @@ class Sensor:
             "humidity": humidity,
             "pressure_pa": pressure,
             "pressure": util.sea_level_pressure(pressure, self._altitude(), temperature),
-            "gas": gas if stable else None,
+            "gas": gas if trusted else None,
             "gas_raw": gas,
             "stable": stable,
+            "gas_warm_s": warm,
+            "gas_trusted": trusted,
             "dew_c": util.dew_point(temperature, humidity),
         }
         reading["dew"] = util.c_to_display(reading["dew_c"])
-        util.log("BME688:", "%.1fC %.0f%% %.1fhPa gas=%s stable=%s" % (
-            temperature, humidity, reading["pressure"] or 0, gas, stable))
+        util.log("BME688:", "%.1fC %.0f%% %.1fhPa gas=%s (%s, warm %.0fs)" % (
+            temperature, humidity, reading["pressure"] or 0, gas,
+            "trusted" if trusted else "warming", warm))
         return reading
 
     @staticmethod

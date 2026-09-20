@@ -118,6 +118,14 @@ NEWS_HEADLINES = 4              # how many to show; 4 fits comfortably
 # The BME688's gas channel is a relative VOC sensor, NOT a calibrated gas
 # detector. BadgerSett learns a rolling baseline and warns when the reading
 # drops sharply below it. Read the safety note in the README.
+# The gas heater needs to run continuously before its reading means
+# anything: from cold it climbs for minutes. Below this many seconds of
+# heater time the reading is shown but treated as unusable - no baseline
+# learning, no alerts, no air-quality verdict. On a badge that sleeps
+# between refreshes this effectively means gas only works on USB power.
+# See "About the gas sensor" in the README before raising GAS_ALERTS.
+GAS_WARMUP_S = 300
+
 GAS_ALERTS = True
 GAS_DROP_WARN = 0.60            # resistance below 60% of baseline -> warn
 GAS_DROP_SEVERE = 0.35          # below 35% of baseline -> severe

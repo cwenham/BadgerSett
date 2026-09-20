@@ -267,6 +267,7 @@ def install_fakes():
     cfg.NEWS_ENABLED = True
     cfg.NEWS_FEED = "top"
     cfg.NEWS_HEADLINES = 4
+    cfg.GAS_WARMUP_S = 300
     cfg.GAS_ALERTS = True
     cfg.GAS_DROP_WARN, cfg.GAS_DROP_SEVERE = 0.60, 0.35
     cfg.GAS_BASELINE_SAMPLES = 20
@@ -296,7 +297,7 @@ SAMPLE_WEATHER = {
 SAMPLE_INDOOR = {
     "temp_c": 22.4, "temp": 22.4, "humidity": 47.0, "pressure_pa": 101320.0,
     "pressure": 1014.6, "gas": 120000.0, "gas_raw": 120000.0, "stable": True,
-    "dew_c": 10.8, "dew": 10.8,
+    "dew_c": 10.8, "dew": 10.8, "gas_trusted": True, "gas_warm_s": 900.0,
 }
 
 
@@ -944,6 +945,64 @@ def test_wrap():
     check("empty text degrades to a single empty line", util.wrap(d, "", 100) == [""])
 
 
+def test_gas_warmup_gate():
+    print("\nBME688 gas warm-up gate")
+    from badgersett import sensor as sensor_mod
+
+    bus = FakeI2C()
+    bme = sensor_mod.Sensor(bus, 0x77)
+    check("sensor comes up", bme.ok, bme.error)
+
+    # samples=2 so the first (warm, dry, pre-heater) conversion is discarded,
+    # exactly as the app does with samples=4.
+    cold = bme.read(samples=2, settle=0, warmup=300)
+    check("a cold reading reports gas_raw", cold["gas_raw"] == 120000.0, cold["gas_raw"])
+    check("...but does not trust it", cold["gas"] is None and not cold["gas_trusted"],
+          (cold["gas"], cold["gas_trusted"]))
+    check("temperature is trusted immediately", cold["temp_c"] == 22.4, cold["temp_c"])
+    check("humidity is trusted immediately", cold["humidity"] == 47.0)
+
+    # Pretend the heater has been running for ten minutes.
+    bme.heater_started = time.ticks_add(time.ticks_ms(), -600000)
+    warm = bme.read(samples=2, settle=0, warmup=300)
+    check("after warm-up the gas reading is trusted",
+          warm["gas"] == 120000.0 and warm["gas_trusted"], (warm["gas"], warm["gas_trusted"]))
+    check("warm seconds are reported", warm["gas_warm_s"] >= 600, warm["gas_warm_s"])
+
+    # The gate must feed through to the baseline and the alerts.
+    state_mod.PATH = "/tmp/badgersett_gas_state.json"
+    if os.path.exists(state_mod.PATH):
+        os.remove(state_mod.PATH)
+    st = state_mod.State()
+    st.update_gas_baseline(cold["gas"], 20)
+    check("an untrusted reading never enters the baseline",
+          st.get("gas_baseline") is None, st.get("gas_baseline"))
+    st.update_gas_baseline(warm["gas"], 20)
+    check("a trusted reading does", st.get("gas_baseline") == 120000.0,
+          st.get("gas_baseline"))
+
+    for _ in range(8):
+        st.update_gas_baseline(warm["gas"], 20)
+    bad_cold = dict(cold, gas=None, gas_raw=30000.0)
+    check("no gas alert can fire from an untrusted reading",
+          not any(a["key"] == "in:gas"
+                  for a in alerts.evaluate(CONFIG, SAMPLE_WEATHER, bad_cold, st, [])))
+    bad_warm = dict(warm, gas=30000.0, gas_raw=30000.0)
+    check("a trusted drop still alerts",
+          any(a["key"] == "in:gas"
+              for a in alerts.evaluate(CONFIG, SAMPLE_WEATHER, bad_warm, st, [])))
+    os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, cold, st, [],
+                                       {"updated": "Updated 23:45", "online": True,
+                                        "muted": False, "sensor": True, "view": 1,
+                                        "credit": "Open-Meteo"})
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("the screen says 'warming', not an air-quality verdict",
+          "warming" in drawn and "clean" not in drawn, drawn[-80:])
+
+
 def test_buttons():
     print("\nbutton mapping and the secret chord")
     from badgersett import app
@@ -1086,8 +1145,10 @@ def test_app_cycle():
     latched = sorted((saved.get("alerts") or {}).keys())
     check("forecast rules and Met Office warnings latch together",
           latched == ["met:rain", "met:wind", "wx:code:96", "wx:gust"], latched)
-    check("gas baseline seeded from the stable sample",
-          saved.get("gas_baseline") == 120000.0, saved.get("gas_baseline"))
+    # A cold cycle must NOT seed the baseline: the gas heater has only been
+    # running for milliseconds, so the reading is mid burn-in and worthless.
+    check("a cold cycle does not seed the gas baseline",
+          saved.get("gas_baseline") is None, saved.get("gas_baseline"))
     check("BBC headlines were fetched",
           any("bbci.co.uk" in u for u in calls), calls)
     cached_news = saved.get("news") or []
@@ -1110,6 +1171,7 @@ def main():
     test_metoffice_alerts()
     test_news()
     test_wrap()
+    test_gas_warmup_gate()
     test_buttons()
     test_layouts()
     test_app_cycle()
