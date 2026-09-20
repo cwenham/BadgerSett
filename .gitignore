@@ -1,0 +1,18 @@
+# Local secrets / personal config — never commit
+config.py
+WIFI_CONFIG.py
+
+# Runtime state pulled back off the badge
+state.json
+*.bin.bak
+
+# Your photo source (the generated photo.png IS committed if you want it)
+photo_src.*
+*_preview.png
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# Backup of the device filesystem taken before reflashing
+.badger-backup/
