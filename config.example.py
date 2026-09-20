@@ -99,6 +99,20 @@ HEAT_WARN = 28                  # degrees, in your chosen unit
 COLD_WARN = -2
 
 # --------------------------------------------------------------------------
+# News (button C)
+# --------------------------------------------------------------------------
+# Headlines come from the BBC's own published RSS feeds, not scraped pages.
+# Set NEWS_ENABLED = False to skip the fetch entirely and save the radio
+# time on every refresh.
+NEWS_ENABLED = True
+
+# A key from badgersett/news.py FEEDS, or any full BBC feed URL:
+#   "top"  "uk"  "world"  "technology"  "science"  "sussex"
+# "sussex" is the BBC's Sussex regional feed, local to Hove.
+NEWS_FEED = "top"
+NEWS_HEADLINES = 4              # how many to show; 4 fits comfortably
+
+# --------------------------------------------------------------------------
 # Indoor sensor alerts
 # --------------------------------------------------------------------------
 # The BME688's gas channel is a relative VOC sensor, NOT a calibrated gas

@@ -70,6 +70,52 @@ def truncate(display, text, max_width, scale=1):
     return text + ".."
 
 
+def wrap(display, text, max_width, scale=1, max_lines=2):
+    """Greedy word wrap using the display's own metrics.
+
+    Returns at most `max_lines` lines, the last one ellipsised if the text
+    did not fit. Bitmap fonts here are proportional, so anything based on
+    a character count would be wrong.
+    """
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        candidate = word if not current else current + " " + word
+        if display.measure_text(candidate, scale) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if len(lines) == max_lines:
+            break
+        # A single word too long for the line gets hard-broken.
+        while display.measure_text(word, scale) > max_width and len(word) > 1:
+            cut = len(word)
+            while cut > 1 and display.measure_text(word[:cut], scale) > max_width:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+            if len(lines) == max_lines:
+                break
+        if len(lines) == max_lines:
+            current = ""
+            break
+        current = word
+    if current and len(lines) < max_lines:
+        lines.append(current)
+
+    if not lines:
+        return [""]
+    # If anything was dropped, mark the final line as truncated.
+    consumed = sum(len(l.split()) for l in lines)
+    if consumed < len(words):
+        last = lines[-1]
+        while last and display.measure_text(last + "..", scale) > max_width:
+            last = last[:-1]
+        lines[-1] = last + ".."
+    return lines
+
+
 def in_quiet_hours(hour, window):
     if not window:
         return False

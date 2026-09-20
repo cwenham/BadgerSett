@@ -11,6 +11,8 @@ the Hershey "sans" font for the name if you prefer it — just remember its
 y is a baseline, not a top edge.
 """
 
+import gc
+
 import badger2040
 
 from . import icons, util, weather as weather_api
@@ -25,8 +27,11 @@ PHOTO_W = 96
 PANE_X = 104                    # left edge of the text pane on the badge view
 PANE_W = WIDTH - PANE_X
 
-VIEW_BADGE, VIEW_WEATHER, VIEW_INDOOR = 0, 1, 2
-VIEW_NAMES = ("BADGE", "WEATHER", "INDOOR")
+COL2_X = 152                    # left edge of the "inside" column on the detail view
+DIVIDER_X = 145
+
+VIEW_BADGE, VIEW_DETAIL, VIEW_NEWS, VIEW_SECRET = 0, 1, 2, 3
+VIEW_NAMES = ("BADGE", "DETAIL", "NEWS", "SECRET")
 
 
 def _degree(d, x, y, scale=1):
@@ -85,12 +90,6 @@ class UI:
     def __init__(self, display, config):
         self.d = display
         self.config = config
-        self._png = None
-        try:
-            import pngdec
-            self._png = pngdec.PNG(display.display)
-        except Exception as exc:
-            util.log("pngdec unavailable:", exc)
 
     # -- shared pieces -----------------------------------------------------
     def _clear(self):
@@ -99,14 +98,30 @@ class UI:
         self.d.set_pen(BLACK)
 
     def _photo(self, x=0, y=0, w=PHOTO_W, h=HEIGHT):
+        """Draw the photo, holding the PNG decoder for as short a time as
+        possible.
+
+        pngdec.PNG() allocates roughly 48KB up front. Held for the life of
+        the UI object that is most of the badge's usable heap, and it
+        leaves too little contiguous memory for a TLS handshake later in
+        the cycle - which shows up as ENOMEM on the HTTPS feeds rather
+        than as anything to do with the photo. So it is built on demand
+        and released immediately.
+        """
         path = getattr(self.config, "PHOTO", None)
-        if path and self._png:
+        if path:
+            png = None
             try:
-                self._png.open_file(path)
-                self._png.decode(x, y)
+                import pngdec
+                png = pngdec.PNG(self.d.display)
+                png.open_file(path)
+                png.decode(x, y)
                 return True
             except Exception as exc:
                 util.log("photo failed:", exc)
+            finally:
+                png = None
+                gc.collect()
         self._initials(x, y, w, h)
         return False
 
@@ -124,12 +139,12 @@ class UI:
                y + (h - 8 * scale) // 2, scale=scale)
         d.set_pen(BLACK)
 
-    def _status(self, x, y, w, status):
-        """One 6px line: last update, link state, mute, current view."""
+    def _status(self, x, y, w, status, left=None):
+        """One 6px line: last update (or `left`), link state, mute, view."""
         d = self.d
         d.set_pen(BLACK)
         d.set_font("bitmap6")
-        left = status.get("updated") or "no data"
+        left = left if left is not None else (status.get("updated") or "no data")
         d.text(util.truncate(d, left, w - 78), x, y, scale=1)
         flags = []
         if status.get("online") is False:
@@ -153,19 +168,6 @@ class UI:
             d.set_font("bitmap6")
             d.text(right, WIDTH - d.measure_text(right, 1) - 4, 5, scale=1)
         d.set_pen(BLACK)
-
-    def _row(self, y, label, value, x=6, w=WIDTH - 12):
-        """Label on the left, value right-aligned, with a dotted leader."""
-        d = self.d
-        d.set_font("bitmap8")
-        d.text(label, x, y, scale=1)
-        value = str(value)
-        value_w = d.measure_text(value, 1)
-        d.text(value, x + w - value_w, y, scale=1)
-        leader_start = x + d.measure_text(label, 1) + 4
-        leader_end = x + w - value_w - 4
-        for px in range(leader_start, leader_end, 3):
-            d.pixel(px, y + 6)
 
     # -- view 0: the badge -------------------------------------------------
     def badge(self, weather, indoor, alerts, status):
@@ -241,137 +243,155 @@ class UI:
                 return
         self._status(PANE_X, 116, PANE_W - 8, status)
 
-    # -- view 1: full forecast --------------------------------------------
-    def weather_view(self, weather, alerts, status):
+    # -- view 1 (button B): forecast and sensors, side by side -----------
+    def detail_view(self, weather, indoor, state, alerts, status):
+        """Everything measured and forecast, in two columns.
+
+        Outside on the left, inside on the right. One screen rather than
+        two so a single press of B answers both questions.
+        """
         d = self.d
         self._clear()
-        if not weather:
-            self._header("WEATHER")
-            d.set_font("bitmap8")
-            d.text("No forecast available.", 8, 40, scale=1)
+
+        clock = (status.get("updated") or "").split()[-1]
+        if ":" not in clock:
+            clock = ""
+
+        # The header bar doubles as the column captions.
+        d.set_pen(BLACK)
+        d.rectangle(0, 0, WIDTH, 15)
+        d.set_pen(WHITE)
+        d.set_font("bitmap8")
+        d.text("OUTSIDE", 4, 4, scale=1)
+        d.text("INSIDE", COL2_X, 4, scale=1)
+        if clock:
             d.set_font("bitmap6")
-            d.text("Press UP to retry the network.", 8, 58, scale=1)
-            self._status(6, 118, WIDTH - 12, status)
-            return
+            d.text(clock, WIDTH - d.measure_text(clock, 1) - 4, 5, scale=1)
+        d.set_pen(BLACK)
+        d.rectangle(DIVIDER_X, 17, 1, 92)
 
-        clock = (weather.get("time") or "")[-5:]
-        self._header("WEATHER", clock)
+        # --- outside -----------------------------------------------------
+        left_w = DIVIDER_X - 10
+        if weather:
+            label, icon_key = weather_api.describe(weather.get("code"))
+            if icon_key == "sun" and not weather.get("is_day", True):
+                icon_key = "moon"
+            icons.draw(d, icon_key, 2, 18, 26)
+            _temp(d, weather.get("temp"), 32, 20, scale=2)
 
-        label, icon_key = weather_api.describe(weather.get("code"))
-        if icon_key == "sun" and not weather.get("is_day", True):
-            icon_key = "moon"
-        icons.draw(d, icon_key, 4, 20, 40)
-        _temp(d, weather.get("temp"), 50, 24, scale=3)
-        d.set_font("bitmap6")
-        d.text(util.truncate(d, label, 120), 50, 52, scale=1)
+            rows = [label]
+            if weather.get("feels") is not None:
+                rows.append("Feels %d" % round(weather["feels"]))
+            if weather.get("hi") is not None:
+                rows.append("H %d   L %d" % (round(weather["hi"]), round(weather["lo"])))
+            if weather.get("wind") is not None:
+                rows.append("Wind %d %s %s" % (round(weather["wind"]), util.speed_unit(),
+                                               util.bearing(weather.get("dir") or 0)))
+            if weather.get("gust_max") is not None:
+                rows.append("Gusts %d %s" % (round(weather["gust_max"]), util.speed_unit()))
+            if weather.get("pop") is not None:
+                rows.append("Rain %d%%" % weather["pop"])
+            if weather.get("hi2") is not None:
+                rows.append("Tomorrow %d/%d" % (round(weather["hi2"]), round(weather["lo2"])))
 
-        feels = weather.get("feels")
-        if feels is not None:
-            d.text("feels %d" % round(feels), 50, 62, scale=1)
-
-        right = 150
-        d.set_font("bitmap6")
-        rows = []
-        if weather.get("hi") is not None:
-            rows.append("Today   H %d / L %d" % (round(weather["hi"]), round(weather["lo"])))
-        if weather.get("hi2") is not None:
-            rows.append("Tomorrow H %d / L %d" % (round(weather["hi2"]), round(weather["lo2"])))
-        if weather.get("wind") is not None:
-            rows.append("Wind    %d %s %s" % (round(weather["wind"]), util.speed_unit(),
-                                              util.bearing(weather.get("dir") or 0)))
-        if weather.get("gust_max") is not None:
-            rows.append("Gusts   %d %s" % (round(weather["gust_max"]), util.speed_unit()))
-        if weather.get("pop") is not None:
-            rows.append("Rain    %d%%" % weather["pop"])
-        if weather.get("humidity") is not None:
-            rows.append("Humidity %d%%" % round(weather["humidity"]))
-        for index, text in enumerate(rows[:6]):
-            d.text(util.truncate(d, text, WIDTH - right - 4), right, 22 + index * 10, scale=1)
-
-        # Data credit. The Met Office asks to be attributed wherever their
-        # warnings feed is used, so this line is not merely decorative.
-        credit = status.get("credit")
-        if credit:
             d.set_font("bitmap6")
-            d.text(util.truncate(d, credit, WIDTH - 12), 6, 82, scale=1)
-
-        if alerts:
-            _banner(d, 0, 92, WIDTH, 16, alerts[0]["text"])
-            if len(alerts) > 1:
-                d.set_font("bitmap6")
-                d.text(util.truncate(d, alerts[1]["text"], WIDTH - 12), 6, 110, scale=1)
-                self._status(6, 120, WIDTH - 12, status)
-                return
-        self._status(6, 118, WIDTH - 12, status)
-
-    # -- view 2: indoor sensor --------------------------------------------
-    def indoor_view(self, indoor, state, alerts, status):
-        d = self.d
-        self._clear()
-        self._header("INDOOR", "BME688")
-
-        if not indoor:
-            d.set_font("bitmap8")
-            d.text("Sensor not responding.", 8, 40, scale=1)
-            d.set_font("bitmap6")
-            d.text("Check the Qw/ST cable and I2C address.", 8, 58, scale=1)
-            self._status(6, 118, WIDTH - 12, status)
-            return
-
-        _temp(d, indoor["temp"], 6, 22, scale=3)
-        d.set_font("bitmap6")
-        dew = indoor.get("dew")
-        if dew is not None:
-            d.text("dew point %.1f%s" % (dew, util.temp_unit()), 6, 52, scale=1)
-
-        y = 22
-        self._row(y, "Humidity", "%.0f %%RH" % indoor["humidity"], x=120, w=WIDTH - 126)
-        y += 12
-        if indoor.get("pressure"):
-            trend = state.pressure_trend()
-            arrow = ""
-            if trend is not None:
-                arrow = " %s%.1f" % ("+" if trend >= 0 else "", trend)
-            self._row(y, "Pressure", "%.0f hPa%s" % (indoor["pressure"], arrow),
-                      x=120, w=WIDTH - 126)
-            y += 12
-
-        gas = indoor.get("gas_raw")
-        baseline = state.get("gas_baseline")
-        if gas:
-            self._row(y, "Gas", "%.1f k" % (gas / 1000.0), x=120, w=WIDTH - 126)
-            y += 12
-            if baseline:
-                ratio = gas / baseline
-                verdict = "clean" if ratio >= 0.85 else ("elevated" if ratio >= 0.6 else "POOR")
-                if not indoor.get("stable"):
-                    verdict = "warming up"
-                self._row(y, "Air", "%d%% base  %s" % (round(ratio * 100), verdict),
-                          x=120, w=WIDTH - 126)
-
-        # Gas bar chart against baseline
-        if gas and baseline:
-            bar_w = 100
-            fill = int(util.clamp(gas / baseline, 0.0, 1.2) / 1.2 * bar_w)
-            d.rectangle(6, 74, bar_w, 10)
-            d.set_pen(WHITE)
-            d.rectangle(7, 75, bar_w - 2, 8)
-            d.set_pen(BLACK)
-            d.rectangle(7, 75, max(fill - 1, 0), 8)
-            d.set_font("bitmap6")
-            d.text("vs baseline", 6, 88, scale=1)
-
-        if alerts:
-            _banner(d, 0, 98, WIDTH, 16, alerts[0]["text"])
-        self._status(6, 118, WIDTH - 12, status)
-
-    # -- dispatch ----------------------------------------------------------
-    def render(self, view, weather, indoor, alerts, state, status):
-        if view == VIEW_WEATHER:
-            self.weather_view(weather, alerts, status)
-        elif view == VIEW_INDOOR:
-            self.indoor_view(indoor, state, alerts, status)
+            y = 48
+            for text in rows[:6]:
+                d.text(util.truncate(d, text, left_w), 4, y, scale=1)
+                y += 10
         else:
+            d.set_font("bitmap6")
+            d.text("No forecast yet", 4, 48, scale=1)
+            d.text("Press UP to retry", 4, 58, scale=1)
+
+        # --- inside ------------------------------------------------------
+        right_w = WIDTH - COL2_X - 4
+        if indoor:
+            _temp(d, indoor.get("temp"), COL2_X, 20, scale=2)
+            d.set_font("bitmap6")
+            rows = ["Humidity %.0f%%" % indoor["humidity"]]
+            if indoor.get("pressure"):
+                trend = state.pressure_trend()
+                arrow = ""
+                if trend is not None:
+                    arrow = "  %s%.1f" % ("+" if trend >= 0 else "", trend)
+                rows.append("%.0f hPa%s" % (indoor["pressure"], arrow))
+            if indoor.get("dew") is not None:
+                rows.append("Dew %.1f%s" % (indoor["dew"], util.temp_unit()))
+
+            gas = indoor.get("gas_raw")
+            baseline = state.get("gas_baseline")
+            ratio = None
+            if gas:
+                rows.append("Gas %.1f k" % (gas / 1000.0))
+                if baseline:
+                    ratio = gas / baseline
+                    if not indoor.get("stable"):
+                        verdict = "warming up"
+                    elif ratio >= 0.85:
+                        verdict = "clean"
+                    elif ratio >= 0.6:
+                        verdict = "elevated"
+                    else:
+                        verdict = "POOR"
+                    rows.append("Air %d%%  %s" % (round(ratio * 100), verdict))
+
+            y = 48
+            for text in rows[:5]:
+                d.text(util.truncate(d, text, right_w), COL2_X, y, scale=1)
+                y += 10
+
+            if ratio is not None:
+                bar_w = right_w - 6
+                fill = int(util.clamp(ratio, 0.0, 1.2) / 1.2 * bar_w)
+                d.rectangle(COL2_X, 100, bar_w, 9)
+                d.set_pen(WHITE)
+                d.rectangle(COL2_X + 1, 101, bar_w - 2, 7)
+                d.set_pen(BLACK)
+                d.rectangle(COL2_X + 1, 101, max(fill - 1, 0), 7)
+        else:
+            d.set_font("bitmap6")
+            d.text("Sensor not", COL2_X, 48, scale=1)
+            d.text("responding", COL2_X, 58, scale=1)
+
+        if alerts:
+            _banner(d, 0, 110, WIDTH, 15, alerts[0]["text"])
+            return
+        self._status(4, 117, WIDTH - 8, status, left=status.get("credit"))
+
+    # -- view 2 (button C): BBC headlines --------------------------------
+    def news_view(self, headlines, status):
+        d = self.d
+        self._clear()
+        clock = (status.get("updated") or "").split()[-1]
+        self._header("BBC NEWS", clock if ":" in clock else "")
+
+        d.set_font("bitmap6")
+        if not headlines:
+            d.text("No headlines yet.", 6, 40, scale=1)
+            d.text("Press UP to fetch them over WiFi.", 6, 54, scale=1)
+        else:
+            y = 20
+            for item in headlines:
+                lines = util.wrap(d, item, WIDTH - 22, 1, 2)
+                if y + 9 * len(lines) > 110:
+                    break
+                d.rectangle(6, y + 2, 3, 3)          # bullet
+                for index, line in enumerate(lines):
+                    d.text(line, 14, y + index * 9, scale=1)
+                y += 9 * len(lines) + 5
+
+        self._status(6, 117, WIDTH - 12, status, left="BBC News")
+
+    # -- dispatch ---------------------------------------------------------
+    def render(self, view, weather, indoor, alerts, state, status, headlines=None):
+        if view == VIEW_DETAIL:
+            self.detail_view(weather, indoor, state, alerts, status)
+        elif view == VIEW_NEWS:
+            self.news_view(headlines or [], status)
+        else:
+            # VIEW_SECRET is reserved and deliberately falls back to the
+            # badge, so an unknown view can never leave a blank screen.
             self.badge(weather, indoor, alerts, status)
         self.d.update()
 

@@ -23,12 +23,13 @@ chest with a haptic buzzer when something is about to go wrong.
 
 ## What it does
 
-- **Badge view** — your photo, name, title, current conditions, and an
-  indoor one-liner.
-- **Weather view** — full forecast: feels-like, wind and gusts, rain
-  probability, today and tomorrow's high/low.
-- **Indoor view** — temperature, humidity, sea-level-corrected pressure
-  with a 3-hour trend, dew point, and air quality against a learned baseline.
+- **Badge view (A)** — your photo, name, title, current conditions, and
+  an indoor one-liner.
+- **Detail view (B)** — outside and inside side by side: feels-like,
+  wind and gusts, rain probability, today's high/low, against humidity,
+  sea-level-corrected pressure with a 3-hour trend, dew point, and air
+  quality versus a learned baseline.
+- **News view (C)** — top headlines from the BBC's published RSS feeds.
 - **Haptic alerts** — escalating patterns for severe weather and indoor
   hazards, with de-duplication, quiet hours, and a mute button.
 - Sleeps between refreshes so a battery lasts, and keeps showing the last
@@ -84,10 +85,16 @@ and offers to auto-calibrate the actuator.
 | Button | Action |
 |---|---|
 | **A** | Badge view |
-| **B** | Weather view |
-| **C** | Indoor view |
+| **B** | Detail view — forecast and sensors together |
+| **C** | BBC news headlines |
 | **UP** | Force a network refresh now |
 | **DOWN** | Mute / unmute the haptics (survives sleep) |
+| **A + C, then UP** | Reserved. Detected, deliberately does nothing yet |
+
+The chord is checked before the individual buttons, since otherwise the
+A in it would simply switch to the badge view and the combination could
+never be told apart. To give it a purpose, fill in `_secret_action()` in
+`badgersett/app.py`.
 
 A button wake re-reads the sensor but skips WiFi, so switching views is
 instant and cheap. Set `SENSOR_ONLY_ON_BUTTON = False` to refresh the
@@ -165,6 +172,41 @@ alert feed there can run to hundreds of kilobytes — so that client
 streams the response in 512-byte chunks and scans for the few fields it
 needs, never holding the whole body.
 
+## News
+
+Headlines come from the BBC's own RSS feeds — published feeds, not
+scraped pages. `NEWS_FEED` takes a key or a full URL:
+
+| Key | Feed |
+|---|---|
+| `top` | Top stories (default) |
+| `uk` / `world` | UK and world news |
+| `technology` / `science` | Section feeds |
+| `sussex` | BBC Sussex regional news |
+
+A feed is 15–30KB, far more than the badge can hold, but item titles
+start about 1KB in. The client streams the response and stops as soon as
+it has enough headlines — typically ~3.5KB of a 28KB feed. Headlines are
+cached, so pressing C works offline; `NEWS_ENABLED = False` skips the
+fetch entirely and saves the radio time.
+
+The BBC's terms for feed reuse are linked from each feed's own
+`<copyright>` element. The news view credits them.
+
+## Memory: why the PNG decoder is built on demand
+
+The RP2040 has ~190KB of usable heap, and a TLS handshake needs a large
+*contiguous* block — about 50KB. `pngdec.PNG()` allocates roughly 48KB
+of its own. Holding a decoder for the life of the UI object leaves the
+largest free block at ~56KB, which is right on the edge: adding one more
+module was enough to turn both HTTPS feeds into `ENOMEM`.
+
+MicroPython's garbage collector does not compact, so `gc.collect()`
+cannot fix that by itself — the fix is to not hold the allocation.
+`ui.UI` therefore builds the PNG decoder only while drawing the photo
+and releases it immediately. If you add anything else that grabs tens of
+kilobytes, do the same, or the symptom will show up somewhere unrelated.
+
 ## About the gas sensor — please read
 
 The BME688's gas channel measures **electrical resistance that falls in
@@ -233,6 +275,7 @@ badgersett/
   icons.py      weather glyphs drawn with primitives, not bitmaps
   weather.py    Open-Meteo client + WMO code table
   metoffice.py  UK Met Office regional warnings (RSS)
+  news.py       BBC headlines, streamed and stopped early
   nws.py        streaming parser for US government alerts
   alerts.py     rules, levels, de-duplication, quiet hours
   sensor.py     BME688 wrapper

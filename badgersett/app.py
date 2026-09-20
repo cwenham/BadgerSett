@@ -19,7 +19,7 @@ import machine
 import config
 
 from . import alerts as alert_rules
-from . import metoffice, net, nws, sensor, ui, util, weather as weather_api
+from . import metoffice, net, news, nws, sensor, ui, util, weather as weather_api
 from .haptics import Haptics
 from .sensor import Sensor
 from .state import State
@@ -31,6 +31,25 @@ _BUTTONS = (
     (badger2040.BUTTON_UP, "UP"),
     (badger2040.BUTTON_DOWN, "DOWN"),
 )
+
+
+# Holding A and C while pressing UP. Reserved for a screen that does not
+# exist yet; detected here so the chord never falls through to plain A.
+SECRET_CHORD = ("A", "C", "UP")
+
+
+def _is_secret_chord(buttons):
+    return all(name in buttons for name in SECRET_CHORD)
+
+
+def _secret_action(state, haptic):
+    """Reserved. Deliberately does nothing yet.
+
+    Put the fourth screen here when you decide what it should show: set
+    a view, or act and leave the current view alone as it does now.
+    """
+    util.log("secret chord (A+C+UP) detected - reserved, no action")
+    return None
 
 
 def _wake_buttons(display):
@@ -84,15 +103,19 @@ def _minutes_stamp():
 
 
 def _refresh_network():
-    """Fetch the forecast and any official alerts. Returns (weather, official)."""
+    """Fetch forecast, official warnings and headlines.
+
+    Returns (weather, official, headlines); any element may be None if
+    that particular fetch failed, so one bad feed cannot lose the others.
+    """
     link = net.connect(getattr(config, "WIFI_SSID", ""),
                        getattr(config, "WIFI_PASSWORD", ""),
                        getattr(config, "WIFI_COUNTRY", "GB"),
                        getattr(config, "WIFI_TIMEOUT", 25))
     if not link:
-        return None, None
+        return None, None, None
 
-    forecast = official = None
+    forecast = official = headlines = None
     try:
         forecast = weather_api.fetch(config.LATITUDE, config.LONGITUDE,
                                      getattr(config, "TIMEZONE", "auto"))
@@ -105,11 +128,15 @@ def _refresh_network():
             official = nws.fetch(config.LATITUDE, config.LONGITUDE,
                                  getattr(config, "NWS_USER_AGENT", "BadgerSett/1.0"),
                                  getattr(config, "NWS_MIN_SEVERITY", "Severe"))
+        gc.collect()
+        if getattr(config, "NEWS_ENABLED", True):
+            headlines = news.fetch(getattr(config, "NEWS_FEED", "top"),
+                                   getattr(config, "NEWS_HEADLINES", 4))
     finally:
         net.disconnect()
         gc.collect()
 
-    return forecast, official
+    return forecast, official, headlines
 
 
 def run():
@@ -150,17 +177,22 @@ def run():
         view = state.get("view", ui.VIEW_BADGE)
         force_refresh = False
 
-        if "A" in buttons:
-            view = ui.VIEW_BADGE
-        elif "B" in buttons:
-            view = ui.VIEW_WEATHER
-        elif "C" in buttons:
-            view = ui.VIEW_INDOOR
-        if "UP" in buttons:
-            force_refresh = True
-        if "DOWN" in buttons:
-            state.set("muted", not state.get("muted"))
-            util.log("muted:", state.get("muted"))
+        if _is_secret_chord(buttons):
+            # Handled first: otherwise the A in the chord would just switch
+            # to the badge view and the chord could never be distinguished.
+            _secret_action(state, haptic)
+        else:
+            if "A" in buttons:
+                view = ui.VIEW_BADGE
+            elif "B" in buttons:
+                view = ui.VIEW_DETAIL
+            elif "C" in buttons:
+                view = ui.VIEW_NEWS
+            if "UP" in buttons:
+                force_refresh = True
+            if "DOWN" in buttons:
+                state.set("muted", not state.get("muted"))
+                util.log("muted:", state.get("muted"))
         if buttons and haptic and haptic.ready and not state.get("muted"):
             haptic.tick()
 
@@ -188,10 +220,11 @@ def run():
             timed_wake and not (buttons and getattr(config, "SENSOR_ONLY_ON_BUTTON", True)))
 
         forecast, official = cached, None
+        headlines = state.get("news") or []
         online = None
         if want_network:
             display.led(64)
-            fresh, official = _refresh_network()
+            fresh, official, fresh_news = _refresh_network()
             display.led(0)
             online = fresh is not None
             if fresh:
@@ -199,7 +232,10 @@ def run():
                 state.set("weather", fresh)
                 state.set("updated", fresh.get("time"))
                 _set_clock(fresh)
-            else:
+            if fresh_news:
+                headlines = fresh_news
+                state.set("news", fresh_news)
+            if not fresh:
                 util.log("refresh failed; showing cached data")
 
         # -- alerts ------------------------------------------------------
@@ -226,7 +262,7 @@ def run():
             "sensor": bool(bme and bme.ok),
             "view": view,
         }
-        screen.render(view, forecast, indoor, current, state, status)
+        screen.render(view, forecast, indoor, current, state, status, headlines)
 
         state.save()
         if haptic and haptic.ready:

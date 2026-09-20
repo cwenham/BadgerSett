@@ -264,6 +264,9 @@ def install_fakes():
     cfg.NWS_MIN_SEVERITY = "Severe"
     cfg.GUST_WARN, cfg.GUST_SEVERE = 60, 90
     cfg.HEAT_WARN, cfg.COLD_WARN = 32, -5
+    cfg.NEWS_ENABLED = True
+    cfg.NEWS_FEED = "top"
+    cfg.NEWS_HEADLINES = 4
     cfg.GAS_ALERTS = True
     cfg.GAS_DROP_WARN, cfg.GAS_DROP_SEVERE = 0.60, 0.35
     cfg.GAS_BASELINE_SAMPLES = 20
@@ -277,7 +280,7 @@ def install_fakes():
 
 CONFIG = install_fakes()
 
-from badgersett import (alerts, haptics, metoffice, nws,  # noqa: E402
+from badgersett import (alerts, haptics, metoffice, news, nws,  # noqa: E402
                         state as state_mod, ui, util, weather)
 
 
@@ -565,21 +568,31 @@ def test_layouts():
         {"key": "wx:gust", "level": 2, "text": "Strong gusts 71 km/h", "source": "forecast"},
     ]
 
+    headlines = [
+        "German Chancellor Merz calls state election a 'disaster' for his party but vows to stay on",
+        "Key takeaways from BBC interview as Earl Spencer defends claims about King",
+        "Watch: Emotional Earl Spencer says he misses sister Diana every day",
+        "Specialist courts for rape cases to be rolled out across England and Wales",
+    ]
+
     scenarios = (
-        ("badge, full data", 0, SAMPLE_WEATHER, SAMPLE_INDOOR, alert_list),
-        ("badge, no alerts", 0, SAMPLE_WEATHER, SAMPLE_INDOOR, []),
-        ("badge, offline cold start", 0, None, None, []),
-        ("weather detail", 1, SAMPLE_WEATHER, SAMPLE_INDOOR, alert_list),
-        ("weather, no data", 1, None, None, []),
-        ("indoor detail", 2, SAMPLE_WEATHER, SAMPLE_INDOOR, alert_list),
-        ("indoor, no sensor", 2, SAMPLE_WEATHER, None, []),
+        ("badge, full data", 0, SAMPLE_WEATHER, SAMPLE_INDOOR, alert_list, None),
+        ("badge, no alerts", 0, SAMPLE_WEATHER, SAMPLE_INDOOR, [], None),
+        ("badge, offline cold start", 0, None, None, [], None),
+        ("detail, full data", 1, SAMPLE_WEATHER, SAMPLE_INDOOR, [], None),
+        ("detail, with alert", 1, SAMPLE_WEATHER, SAMPLE_INDOOR, alert_list, None),
+        ("detail, no forecast", 1, None, SAMPLE_INDOOR, [], None),
+        ("detail, no sensor", 1, SAMPLE_WEATHER, None, [], None),
+        ("news, four headlines", 2, SAMPLE_WEATHER, SAMPLE_INDOOR, [], headlines),
+        ("news, empty", 2, SAMPLE_WEATHER, SAMPLE_INDOOR, [], []),
+        ("secret view falls back to badge", 3, SAMPLE_WEATHER, SAMPLE_INDOOR, [], None),
     )
 
-    for label, view, wx, indoor, alist in scenarios:
+    for label, view, wx, indoor, alist, heads in scenarios:
         display = FakeDisplay()
         screen = ui.UI(display, CONFIG)
         try:
-            screen.render(view, wx, indoor, alist, st, dict(status, view=view))
+            screen.render(view, wx, indoor, alist, st, dict(status, view=view), heads)
             drew = len(display.calls) > 5 and display.updates == 1
             check("%s renders" % label, drew,
                   "calls=%d updates=%d" % (len(display.calls), display.updates))
@@ -613,11 +626,22 @@ def test_layouts():
                                          for c in display.calls))
 
     display = FakeDisplay()
-    ui.UI(display, CONFIG).weather_view(SAMPLE_WEATHER, [], status)
-    check("weather view carries the Met Office attribution",
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, SAMPLE_INDOOR, st, [], status)
+    check("detail view carries the Met Office attribution",
           any(c[0] == "text" and "Met Office" in str(c[1][0]) for c in display.calls))
     check("attribution stays on the panel", not display.out_of_bounds,
           display.out_of_bounds[:2])
+    texts = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("detail view shows outside and inside together",
+          "OUTSIDE" in texts and "INSIDE" in texts and "Humidity" in texts
+          and "Gusts" in texts, texts[:90])
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).news_view(headlines, dict(status, view=2))
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("news view wraps long headlines rather than clipping",
+          "Merz" in drawn and not display.out_of_bounds, display.out_of_bounds[:2])
+    check("news view credits the BBC", "BBC News" in drawn)
     CONFIG.UNITS = "metric"
     os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
 
@@ -778,6 +802,168 @@ def test_metoffice_alerts():
     os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
 
 
+BBC_RSS = """<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>
+  <title><![CDATA[BBC News]]></title>
+  <description><![CDATA[BBC News - News Front Page]]></description>
+  <image><url>http://x/y.gif</url><title>BBC News</title><link>http://bbc.co.uk</link></image>
+  <copyright><![CDATA[Copyright: (C) British Broadcasting Corporation]]></copyright>
+  <item>
+    <title><![CDATA[German Chancellor Merz calls state election a 'disaster']]></title>
+    <description><![CDATA[%s]]></description>
+  </item>
+  <item>
+    <title><![CDATA[Rain &amp; wind warnings issued for the south coast]]></title>
+    <description><![CDATA[%s]]></description>
+  </item>
+  <item>
+    <title>Plain title with no CDATA wrapper</title>
+  </item>
+  <item>
+    <title><![CDATA[A fourth headline]]></title>
+  </item>
+  <item>
+    <title><![CDATA[A fifth headline that should not be fetched]]></title>
+  </item>
+</channel></rss>""" % ("padding " * 60, "padding " * 60)
+
+
+def test_news():
+    print("\nBBC news feed")
+
+    def respond(body):
+        class Raw:
+            def __init__(self):
+                self.data, self.pos = body.encode(), 0
+
+            def read(self, n):
+                chunk = self.data[self.pos:self.pos + n]
+                self.pos += len(chunk)
+                return chunk
+
+        class Response:
+            status_code = 200
+
+            def __init__(self):
+                self.raw = Raw()
+
+            def close(self):
+                pass
+
+        return Response
+
+    original = news.requests
+    try:
+        urls = []
+
+        def capture(url, headers=None):
+            urls.append(url)
+            return respond(BBC_RSS)()
+
+        news.requests = types.SimpleNamespace(get=capture)
+        got = news.fetch("top", 4)
+        check("four headlines returned", len(got) == 4, got)
+        check("CDATA stripped", got[0].startswith("German Chancellor"), got[0])
+        check("entities decoded", "&" in got[1] and "&amp;" not in got[1], got[1])
+        check("plain (non-CDATA) title also works",
+              got[2] == "Plain title with no CDATA wrapper", got[2])
+        check("channel and image titles excluded", "BBC News" not in got, got)
+        check("stops at the requested count, ignoring later items",
+              not any("fifth" in h for h in got), got)
+        check("feed key resolved to a BBC URL",
+              urls and urls[0] == news.FEEDS["top"], urls)
+
+        news.requests = types.SimpleNamespace(get=capture)
+        check("count is honoured", len(news.fetch("top", 2)) == 2)
+
+        urls[:] = []
+        news.requests = types.SimpleNamespace(get=capture)
+        news.fetch("sussex", 1)
+        check("regional feed key works", "sussex" in urls[0], urls)
+
+        urls[:] = []
+        news.requests = types.SimpleNamespace(get=capture)
+        news.fetch("https://feeds.bbci.co.uk/news/uk/rss.xml", 1)
+        check("a full URL passes through", urls[0].endswith("/news/uk/rss.xml"), urls)
+
+        urls[:] = []
+        news.requests = types.SimpleNamespace(get=capture)
+        news.fetch("not-a-feed", 1)
+        check("an unknown key falls back to top stories",
+              urls and urls[0] == news.FEEDS["top"], urls)
+
+        # A title split across a chunk boundary must still be recovered.
+        news.CHUNK = 7
+        news.requests = types.SimpleNamespace(get=capture)
+        tiny = news.fetch("top", 4)
+        news.CHUNK = 512
+        check("titles spanning chunk boundaries survive", len(tiny) == 4, tiny)
+        check("same headlines regardless of chunk size", tiny == got, tiny)
+
+        class Dead:
+            status_code = 503
+
+            def close(self):
+                pass
+
+        news.requests = types.SimpleNamespace(get=lambda url, headers=None: Dead())
+        check("an HTTP error returns no headlines, and does not raise",
+              news.fetch("top", 4) == [])
+    finally:
+        news.requests = original
+
+
+def test_wrap():
+    print("\nword wrap")
+    d = FakeDisplay()
+    d.set_font("bitmap6")
+    long_line = ("German Chancellor Merz calls state election a 'disaster' "
+                 "for his party but vows to stay on")
+    lines = util.wrap(d, long_line, 274, 1, 2)
+    check("wraps to the requested number of lines", len(lines) == 2, lines)
+    check("every line fits the width",
+          all(d.measure_text(l, 1) <= 274 for l in lines),
+          [(l, d.measure_text(l, 1)) for l in lines])
+    check("no words are lost mid-wrap",
+          lines[0].startswith("German Chancellor"), lines[0])
+    check("a headline that fits is NOT marked truncated",
+          not lines[-1].endswith(".."), lines[-1])
+
+    # Same text forced into one line must be ellipsised.
+    one = util.wrap(d, long_line, 274, 1, 1)
+    check("overflow is marked with an ellipsis", one[-1].endswith(".."), one[-1])
+    check("the ellipsised line still fits", d.measure_text(one[-1], 1) <= 274,
+          d.measure_text(one[-1], 1))
+
+    short = util.wrap(d, "Short one", 274, 1, 2)
+    check("short text stays on one line, unmarked",
+          short == ["Short one"], short)
+
+    huge = util.wrap(d, "Supercalifragilisticexpialidocious" * 3, 60, 1, 2)
+    check("an unbreakable word is hard-broken rather than overflowing",
+          all(d.measure_text(l, 1) <= 60 for l in huge), huge)
+    check("empty text degrades to a single empty line", util.wrap(d, "", 100) == [""])
+
+
+def test_buttons():
+    print("\nbutton mapping and the secret chord")
+    from badgersett import app
+
+    check("A+C+UP is the secret chord", app._is_secret_chord(["A", "C", "UP"]))
+    check("order does not matter", app._is_secret_chord(["UP", "C", "A"]))
+    check("extra buttons still count", app._is_secret_chord(["A", "B", "C", "UP"]))
+    check("A+C alone is not the chord", not app._is_secret_chord(["A", "C"]))
+    check("A+UP alone is not the chord", not app._is_secret_chord(["A", "UP"]))
+    check("C+UP alone is not the chord", not app._is_secret_chord(["C", "UP"]))
+    check("a bare A is not the chord", not app._is_secret_chord(["A"]))
+    check("nothing pressed is not the chord", not app._is_secret_chord([]))
+    check("the reserved action is a no-op returning None",
+          app._secret_action(None, None) is None)
+    check("chord constant is A, C and UP",
+          sorted(app.SECRET_CHORD) == ["A", "C", "UP"], app.SECRET_CHORD)
+    check("views are badge/detail/news/secret",
+          (ui.VIEW_BADGE, ui.VIEW_DETAIL, ui.VIEW_NEWS, ui.VIEW_SECRET) == (0, 1, 2, 3))
+
+
 def test_app_cycle():
     print("\nfull wake cycle (app.py)")
     from badgersett import app, nws as nws_mod, weather as weather_mod
@@ -811,17 +997,41 @@ def test_app_cycle():
     calls = []
     met_rss = _rss_response(BUSY_RSS)
 
+    def bbc_response():
+        class Raw:
+            def __init__(self):
+                self.data, self.pos = BBC_RSS.encode(), 0
+
+            def read(self, n):
+                chunk = self.data[self.pos:self.pos + n]
+                self.pos += len(chunk)
+                return chunk
+
+        class Response:
+            status_code = 200
+
+            def __init__(self):
+                self.raw = Raw()
+
+            def close(self):
+                pass
+
+        return Response()
+
     def fake_get(url, headers=None):
         calls.append(url)
         if "metoffice" in url:
             return met_rss()
+        if "bbci.co.uk" in url:
+            return bbc_response()
         return MeteoResponse()
 
-    from badgersett import metoffice as met_mod
+    from badgersett import metoffice as met_mod, news as news_mod
     fake_requests = types.SimpleNamespace(get=fake_get)
     weather_mod.requests = fake_requests
     nws_mod.requests = fake_requests
     met_mod.requests = fake_requests
+    news_mod.requests = fake_requests
 
     displays = []
     original_display = sys.modules["badger2040"].Badger2040
@@ -878,6 +1088,13 @@ def test_app_cycle():
           latched == ["met:rain", "met:wind", "wx:code:96", "wx:gust"], latched)
     check("gas baseline seeded from the stable sample",
           saved.get("gas_baseline") == 120000.0, saved.get("gas_baseline"))
+    check("BBC headlines were fetched",
+          any("bbci.co.uk" in u for u in calls), calls)
+    cached_news = saved.get("news") or []
+    check("headlines cached for an offline button-C press",
+          len(cached_news) == CONFIG.NEWS_HEADLINES, cached_news)
+    check("cached headline text is clean",
+          cached_news and cached_news[0].startswith("German Chancellor"), cached_news[:1])
     os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
 
 
@@ -891,6 +1108,9 @@ def main():
     test_haptics()
     test_metoffice()
     test_metoffice_alerts()
+    test_news()
+    test_wrap()
+    test_buttons()
     test_layouts()
     test_app_cycle()
     print("\n%s" % ("-" * 46))
