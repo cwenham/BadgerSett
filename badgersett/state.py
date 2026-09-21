@@ -21,6 +21,7 @@ DEFAULTS = {
     "weather": None,       # last good forecast, so a button wake can still draw
     "indoor": None,        # last good sensor reading
     "news": [],            # last good headlines, so button C works offline
+    "location": None,      # the network we last joined, and where it is
     "updated": None,       # local HH:MM of the last successful network refresh
     "last_refresh": None,  # minutes-since-epoch of that refresh, for staleness
     "cal": None,           # DRV2605L autocalibration results [comp, bemf, fb]

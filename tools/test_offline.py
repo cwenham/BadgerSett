@@ -209,6 +209,14 @@ def install_fakes():
     network.country = lambda c: None
 
     class WLAN:
+        visible = [(b"OfficeNet", b"\x00", 1, -55, 0, False),
+                   (b"HomeNet", b"\x01", 6, -78, 0, False),
+                   (b"HomeNet", b"\x02", 11, -66, 0, False),   # same SSID, 2 APs
+                   (b"", b"\x03", 3, -40, 0, True),            # hidden
+                   (b"Neighbour", b"\x04", 9, -90, 0, False)]
+        attempts = []
+        joinable = None          # None = anything works
+
         def __init__(self, mode):
             pass
 
@@ -218,11 +226,18 @@ def install_fakes():
         def config(self, **kw):
             pass
 
-        def isconnected(self):
-            return True
+        def scan(self):
+            return WLAN.visible
 
-        def connect(self, *a):
-            pass
+        def isconnected(self):
+            if not WLAN.attempts:
+                return False
+            if WLAN.joinable is None:
+                return True
+            return WLAN.attempts[-1] == WLAN.joinable
+
+        def connect(self, ssid, password=None):
+            WLAN.attempts.append(ssid)
 
         def disconnect(self):
             pass
@@ -283,8 +298,13 @@ def install_fakes():
     cfg.TITLE = "Principal Engineer"
     cfg.ORG = "Badger Industries"
     cfg.PHOTO = None
-    cfg.WIFI_SSID = "ssid"
-    cfg.WIFI_PASSWORD = "pw"
+    cfg.WIFI_NETWORKS = [
+        {"label": "Home", "ssid": "HomeNet", "password": "hpw",
+         "lat": 50.8279, "lon": -0.1687, "met_region": "se", "altitude": 10},
+        {"label": "Office", "ssid": "OfficeNet", "password": "opw",
+         "lat": 53.4808, "lon": -2.2426, "met_region": "nw", "altitude": 38},
+    ]
+    cfg.WIFI_MAX_ATTEMPTS = 3
     cfg.WIFI_COUNTRY = "GB"
     cfg.WIFI_TIMEOUT = 5
     cfg.LATITUDE, cfg.LONGITUDE = 50.8279, -0.1687   # Hove
@@ -1106,6 +1126,91 @@ def test_power_detection():
     machine_mod.Pin = broken
 
 
+def test_wifi_selection():
+    print("\nmulti-network WiFi")
+    from badgersett import net
+    WLAN = sys.modules["network"].WLAN
+
+    nets = net.networks_from_config(CONFIG)
+    check("both configured networks parsed", len(nets) == 2, nets)
+    check("config order is preserved",
+          [n["ssid"] for n in nets] == ["HomeNet", "OfficeNet"])
+    check("each network carries its own location",
+          nets[0]["lat"] == 50.8279 and nets[1]["lat"] == 53.4808)
+    check("each carries its own warnings region",
+          (nets[0]["met_region"], nets[1]["met_region"]) == ("se", "nw"))
+    check("each carries its own altitude",
+          (nets[0]["altitude"], nets[1]["altitude"]) == (10, 38))
+
+    visible = net.scan_ssids(WLAN(0))
+    check("scan de-duplicates an SSID seen on two APs",
+          sorted(visible) == ["HomeNet", "Neighbour", "OfficeNet"], sorted(visible))
+    check("the strongest AP wins for a duplicated SSID",
+          visible["HomeNet"] == -66, visible["HomeNet"])
+    check("hidden (empty) SSIDs are skipped", "" not in visible)
+
+    # The headline requirement: config order beats signal strength.
+    ordered = net.select_networks(nets, visible)
+    check("preferred network wins despite a weaker signal",
+          ordered[0]["ssid"] == "HomeNet", [n["ssid"] for n in ordered])
+
+    ordered = net.select_networks(nets, {"OfficeNet": -55})
+    check("an out-of-range preference yields to one in range",
+          ordered[0]["ssid"] == "OfficeNet", [n["ssid"] for n in ordered])
+    check("...but the absent one is still kept as a fallback",
+          ordered[1]["ssid"] == "HomeNet", [n["ssid"] for n in ordered])
+
+    ordered = net.select_networks(nets, {})
+    check("with nothing visible, config order is tried anyway (hidden SSIDs)",
+          [n["ssid"] for n in ordered] == ["HomeNet", "OfficeNet"])
+
+    WLAN.attempts, WLAN.joinable = [], None
+    link, active = net.connect_best(nets, "GB", 5)
+    check("connect_best joins the preferred network",
+          active and active["ssid"] == "HomeNet", active)
+    check("it reports the location that network implies",
+          active["label"] == "Home" and active["met_region"] == "se", active)
+    check("only one connection was attempted", WLAN.attempts == ["HomeNet"],
+          WLAN.attempts)
+
+    # Preferred network present but unjoinable (wrong password): fall through.
+    WLAN.attempts, WLAN.joinable = [], "OfficeNet"
+    link, active = net.connect_best(nets, "GB", 1)
+    check("a failing preferred network falls through to the next",
+          active and active["ssid"] == "OfficeNet", active)
+    check("both were tried, in preference order",
+          WLAN.attempts == ["HomeNet", "OfficeNet"], WLAN.attempts)
+
+    WLAN.attempts, WLAN.joinable = [], "NothingHere"
+    link, active = net.connect_best(nets, "GB", 1)
+    check("no joinable network returns (None, None)",
+          link is None and active is None, (link, active))
+
+    check("max_attempts caps how many are tried",
+          len(WLAN.attempts) <= 3, WLAN.attempts)
+
+    WLAN.attempts, WLAN.joinable = [], None
+    check("an empty network list is handled",
+          net.connect_best([], "GB", 1) == (None, None))
+
+    # Legacy single-network config must still work.
+    legacy = types.SimpleNamespace(WIFI_SSID="OldNet", WIFI_PASSWORD="p",
+                                   LATITUDE=1.0, LONGITUDE=2.0,
+                                   MET_REGION="wl", ALTITUDE_M=5)
+    one = net.networks_from_config(legacy)
+    check("a legacy WIFI_SSID config still works",
+          len(one) == 1 and one[0]["ssid"] == "OldNet", one)
+    check("legacy entry inherits the top-level location",
+          one[0]["lat"] == 1.0 and one[0]["met_region"] == "wl", one[0])
+    check("a config with no wifi at all yields an empty list",
+          net.networks_from_config(types.SimpleNamespace()) == [])
+
+    malformed = types.SimpleNamespace(WIFI_NETWORKS=[
+        {"ssid": "Good", "password": "x"}, {"password": "no ssid"}, "junk"])
+    check("malformed entries are skipped, not fatal",
+          [n["ssid"] for n in net.networks_from_config(malformed)] == ["Good"])
+
+
 def test_clock():
     print("\nclock and refresh scheduling")
     from badgersett import clock
@@ -1286,8 +1391,11 @@ def test_app_cycle():
           displays[0].updates if displays else "no display")
     check("it slept for the configured interval", slept == [CONFIG.REFRESH_MINUTES], slept)
     check("the forecast was fetched", any("open-meteo" in u for u in calls), calls)
-    check("Met Office warnings were fetched",
+    check("Met Office warnings were fetched for the network's region",
           any("metoffice.gov.uk" in u and u.endswith("/se") for u in calls), calls)
+    check("the forecast used the joined network's coordinates",
+          any("latitude=50.8279" in u and "longitude=-0.1687" in u for u in calls),
+          [u for u in calls if "open-meteo" in u][:1])
     check("the US NWS was not contacted",
           not any("weather.gov" in u for u in calls), calls)
 
@@ -1307,6 +1415,11 @@ def test_app_cycle():
     # running for milliseconds, so the reading is mid burn-in and worthless.
     check("a cold cycle does not seed the gas baseline",
           saved.get("gas_baseline") is None, saved.get("gas_baseline"))
+    loc = saved.get("location") or {}
+    check("the joined network's location was remembered",
+          loc.get("label") == "Home" and loc.get("met_region") == "se", loc)
+    check("its altitude was remembered for pressure correction",
+          loc.get("altitude") == 10, loc)
     check("BBC headlines were fetched",
           any("bbci.co.uk" in u for u in calls), calls)
     cached_news = saved.get("news") or []
@@ -1331,6 +1444,7 @@ def main():
     test_wrap()
     test_gas_warmup_gate()
     test_power_detection()
+    test_wifi_selection()
     test_clock()
     test_buttons()
     test_layouts()

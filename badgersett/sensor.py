@@ -29,9 +29,15 @@ def make_i2c(sda, scl, freq=100000):
 
 
 class Sensor:
-    def __init__(self, i2c, address=0x77):
+    def __init__(self, i2c, address=0x77, altitude=None):
         self.i2c = i2c
         self.address = address
+        # Sea-level pressure depends on where you are, so this follows the
+        # active WiFi network's location rather than a fixed config value.
+        if altitude is None:
+            import config
+            altitude = getattr(config, "ALTITUDE_M", 0)
+        self.altitude = altitude
         self.device = None
         self.error = None
         # The gas heater starts when the device is configured. Everything
@@ -117,7 +123,7 @@ class Sensor:
             "temp": util.c_to_display(temperature),
             "humidity": humidity,
             "pressure_pa": pressure,
-            "pressure": util.sea_level_pressure(pressure, self._altitude(), temperature),
+            "pressure": util.sea_level_pressure(pressure, self.altitude, temperature),
             "gas": gas if trusted else None,
             "gas_raw": gas,
             "stable": stable,
@@ -131,7 +137,3 @@ class Sensor:
             temperature, humidity, reading["pressure"] or 0, gas, reason))
         return reading
 
-    @staticmethod
-    def _altitude():
-        import config
-        return getattr(config, "ALTITUDE_M", 0)

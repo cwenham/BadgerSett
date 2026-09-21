@@ -207,6 +207,52 @@ cannot fix that by itself — the fix is to not hold the allocation.
 and releases it immediately. If you add anything else that grabs tens of
 kilobytes, do the same, or the symptom will show up somewhere unrelated.
 
+## Multiple WiFi networks, and where they are
+
+`WIFI_NETWORKS` is an ordered list. On each refresh the badge scans, then
+joins the first entry in that list it can see:
+
+```python
+WIFI_NETWORKS = [
+    {"label": "Home",   "ssid": "...", "password": "...",
+     "lat": 50.8279, "lon": -0.1687, "met_region": "se", "altitude": 10},
+    {"label": "Office", "ssid": "...", "password": "...",
+     "lat": 51.5074, "lon": -0.1278, "met_region": "se", "altitude": 11},
+]
+```
+
+**Order is preference, not signal strength.** A weaker network earlier in
+the list beats a stronger one further down, so put the places you care
+about first. Verified on hardware: with two APs in range at −74 dBm and
+−71 dBm, the −74 dBm one was chosen because it came first.
+
+**Each network carries its location**, and that is the point of the
+feature: joining a different network moves the forecast coordinates, the
+Met Office warnings region and the altitude used for pressure
+correction, together. Warnings for the region you are not in would be
+worse than no warnings.
+
+Everything except `ssid` is optional and falls back to the top-level
+settings, so a single `WIFI_SSID` / `WIFI_PASSWORD` config still works
+unchanged.
+
+Details:
+
+- A **hidden** network broadcasts no SSID and never appears in a scan, so
+  it cannot be preferred by signal. It is still tried by name, after
+  every visible candidate.
+- One SSID on **several APs** is de-duplicated; the strongest is used for
+  reporting.
+- If the preferred network is visible but refuses the connection (a
+  changed password, say), the badge falls through to the next candidate.
+  `WIFI_MAX_ATTEMPTS` caps how many it tries in one wake, so a bad
+  network cannot drain the battery retrying.
+- The scan costs about half a second.
+
+The place last joined is remembered, so a button press with no network
+still labels the cached forecast with the right location. The detail
+view shows it beside `OUTSIDE`.
+
 ## Timekeeping
 
 Both clocks — the RP2040's own RTC and the battery-backed PCF85063A —

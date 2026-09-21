@@ -20,14 +20,55 @@ PHOTO = "photo.png"
 # --------------------------------------------------------------------------
 # WiFi
 # --------------------------------------------------------------------------
-WIFI_SSID = "your-ssid"
-WIFI_PASSWORD = "your-password"
+# The badge scans for networks in range and joins the first one from
+# this list that it can see. ORDER IS PREFERENCE: an earlier entry wins
+# even if a later one has a stronger signal, so put home or office first.
+#
+# Each network carries the location it implies. Joining a different
+# network therefore moves the forecast, the Met Office warnings region
+# and the altitude used for pressure, all together - so the badge tells
+# you about where you actually are.
+#
+# Per-network keys ("ssid" is the only required one):
+#   ssid        the network name
+#   password    its password ("" for an open network)
+#   label       shown on the detail view; defaults to the ssid
+#   lat / lon   coordinates for the forecast
+#   met_region  Met Office region code (see MET_REGION below)
+#   altitude    metres above sea level, for pressure correction
+#
+# Anything omitted falls back to the top-level settings further down.
+WIFI_NETWORKS = [
+    {
+        "label": "Home",
+        "ssid": "your-home-ssid",
+        "password": "your-password",
+        "lat": 50.8279, "lon": -0.1687,     # Hove
+        "met_region": "se",
+        "altitude": 10,
+    },
+    {
+        "label": "Office",
+        "ssid": "your-office-ssid",
+        "password": "another-password",
+        "lat": 51.5074, "lon": -0.1278,     # London
+        "met_region": "se",
+        "altitude": 11,
+    },
+]
+
 WIFI_COUNTRY = "GB"             # ISO country code: regulatory domain
-WIFI_TIMEOUT = 25               # seconds before giving up
+WIFI_TIMEOUT = 25               # seconds per attempt before giving up
+WIFI_MAX_ATTEMPTS = 3           # how many candidates to try in one wake
+
+# A hidden network broadcasts no SSID and will not appear in the scan.
+# It is still tried by name, just after every visible candidate.
 
 # --------------------------------------------------------------------------
 # Location & units
 # --------------------------------------------------------------------------
+# Fallback location, used only for networks that do not set their own
+# lat/lon (and by a legacy single-network config).
 LATITUDE = 50.8279              # Hove, East Sussex
 LONGITUDE = -0.1687
 TIMEZONE = "auto"               # "auto" derives it from lat/long

@@ -263,6 +263,12 @@ class UI:
         d.set_pen(WHITE)
         d.set_font("bitmap8")
         d.text("OUTSIDE", 4, 4, scale=1)
+        # Which place this forecast is for - it follows the WiFi network.
+        place = status.get("location")
+        if place:
+            d.set_font("bitmap6")
+            d.text(util.truncate(d, place, COL2_X - 70), 62, 5, scale=1)
+            d.set_font("bitmap8")
         d.text("INSIDE", COL2_X, 4, scale=1)
         if clock:
             d.set_font("bitmap6")

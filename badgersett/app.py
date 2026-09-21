@@ -72,17 +72,20 @@ def _wake_buttons(display):
 
 
 def _refresh_network():
-    """Fetch forecast, official warnings and headlines.
+    """Pick a WiFi network, then fetch everything tied to where it is.
 
-    Returns (weather, official, headlines); any element may be None if
-    that particular fetch failed, so one bad feed cannot lose the others.
+    Returns (weather, official, headlines, network); any element may be
+    None if that particular fetch failed, so one bad feed cannot lose the
+    others. `network` is the entry we actually joined, which carries the
+    location the rest of the data belongs to.
     """
-    link = net.connect(getattr(config, "WIFI_SSID", ""),
-                       getattr(config, "WIFI_PASSWORD", ""),
-                       getattr(config, "WIFI_COUNTRY", "GB"),
-                       getattr(config, "WIFI_TIMEOUT", 25))
+    networks = net.networks_from_config(config)
+    link, active = net.connect_best(networks,
+                                    getattr(config, "WIFI_COUNTRY", "GB"),
+                                    getattr(config, "WIFI_TIMEOUT", 25),
+                                    getattr(config, "WIFI_MAX_ATTEMPTS", 3))
     if not link:
-        return None, None, None
+        return None, None, None, None
 
     # Time first, while the link is definitely up. NTP gives UTC; the
     # local offset arrives with the forecast a moment later.
@@ -90,7 +93,7 @@ def _refresh_network():
 
     forecast = official = headlines = None
     try:
-        forecast = weather_api.fetch(config.LATITUDE, config.LONGITUDE,
+        forecast = weather_api.fetch(active["lat"], active["lon"],
                                      getattr(config, "TIMEZONE", "auto"))
         if forecast:
             clock.apply_utc_offset(forecast.get("utc_offset"))
@@ -98,10 +101,10 @@ def _refresh_network():
         gc.collect()
         source = getattr(config, "ALERT_SOURCE", "none").lower()
         if source == "metoffice":
-            official = metoffice.fetch(getattr(config, "MET_REGION", "se"),
+            official = metoffice.fetch(active["met_region"],
                                        getattr(config, "MET_MIN_COLOUR", "Yellow"))
         elif source == "nws":
-            official = nws.fetch(config.LATITUDE, config.LONGITUDE,
+            official = nws.fetch(active["lat"], active["lon"],
                                  getattr(config, "NWS_USER_AGENT", "BadgerSett/1.0"),
                                  getattr(config, "NWS_MIN_SEVERITY", "Severe"))
         gc.collect()
@@ -112,7 +115,7 @@ def _refresh_network():
         net.disconnect()
         gc.collect()
 
-    return forecast, official, headlines
+    return forecast, official, headlines, active
 
 
 def run():
@@ -126,6 +129,8 @@ def run():
     # running on its own. Restore from it before deciding anything.
     clock.restore()
 
+    location = state.get("location") or {}
+
     i2c = None
     bme = haptic = None
     try:
@@ -134,7 +139,8 @@ def run():
         util.log("I2C bus failed:", exc)
 
     if i2c:
-        bme = Sensor(i2c, getattr(config, "BME688_ADDRESS", 0x77))
+        bme = Sensor(i2c, getattr(config, "BME688_ADDRESS", 0x77),
+                     location.get("altitude"))
         if bme.error:
             util.log(bme.error)
         if getattr(config, "HAPTIC_ENABLED", True):
@@ -208,9 +214,16 @@ def run():
         online = None
         if want_network:
             display.led(64)
-            fresh, official, fresh_news = _refresh_network()
+            fresh, official, fresh_news, active = _refresh_network()
             display.led(0)
             online = fresh is not None
+            if active:
+                # Remember where we are, so a button wake with no network
+                # still labels the cached data with the right place.
+                state.set("location", {k: active[k] for k in
+                                       ("label", "lat", "lon", "met_region", "altitude")})
+                if bme:
+                    bme.altitude = active["altitude"]
             if fresh:
                 forecast = fresh
                 state.set("weather", fresh)
@@ -247,6 +260,7 @@ def run():
             "online": online,
             "muted": state.get("muted"),
             "sensor": bool(bme and bme.ok),
+            "location": (state.get("location") or {}).get("label"),
             "view": view,
         }
         screen.render(view, forecast, indoor, current, state, status, headlines)
