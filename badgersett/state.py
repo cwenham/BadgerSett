@@ -21,7 +21,8 @@ DEFAULTS = {
     "weather": None,       # last good forecast, so a button wake can still draw
     "indoor": None,        # last good sensor reading
     "news": [],            # last good headlines, so button C works offline
-    "updated": None,       # ISO string of the last successful network refresh
+    "updated": None,       # local HH:MM of the last successful network refresh
+    "last_refresh": None,  # minutes-since-epoch of that refresh, for staleness
     "cal": None,           # DRV2605L autocalibration results [comp, bemf, fb]
 }
 
@@ -105,8 +106,8 @@ class State:
 
     # -- pressure history --------------------------------------------------
     def push_pressure(self, hpa, stamp, keep=12):
-        if hpa is None:
-            return
+        if hpa is None or stamp is None:
+            return          # no clock yet: a trend needs real timestamps
         history = list(self.get("pressure") or [])
         history.append([stamp, round(hpa, 1)])
         if len(history) > keep:

@@ -207,6 +207,34 @@ cannot fix that by itself — the fix is to not hold the allocation.
 and releases it immediately. If you add anything else that grabs tens of
 kilobytes, do the same, or the symptom will show up somewhere unrelated.
 
+## Timekeeping
+
+Both clocks — the RP2040's own RTC and the battery-backed PCF85063A —
+start unset at 2000-01-01, and the RP2040's is wiped by every power cut.
+
+On each successful connection the badge takes the time from NTP (UTC),
+then shifts it to local using the `utc_offset_seconds` Open-Meteo returns
+for your coordinates. That handles BST, and any other DST rule, without
+a timezone database on the badge. The result is written to the PCF so it
+survives the next power cut.
+
+`Updated HH:MM` is the time of the fetch, read from that clock — not the
+forecast's own timestamp, which Open-Meteo quantises into 15-minute
+buckets.
+
+**Refreshes are scheduled by data age, not by wake reason.** An earlier
+version asked `badger2040.woken_by_rtc()` whether this was a timed wake.
+That reports why the board *powered on*, so on USB — where `sleep_for()`
+cannot actually cut power — it stays False indefinitely and nothing ever
+refreshes. Worse, the clock was only ever set by a refresh, so the two
+deadlocked: a frozen timestamp, an unset RTC, and a badge that still
+responded to buttons and so looked perfectly healthy.
+
+Now the badge records when it last fetched and compares that against
+`REFRESH_MINUTES`. Unknown state — no clock, no record, or a clock that
+has jumped backwards — always counts as "refresh now", so a lost clock
+heals itself on the next wake instead of wedging.
+
 ## About the gas sensor — please read
 
 The BME688's gas channel measures **electrical resistance that falls in
@@ -234,6 +262,23 @@ A badge that wakes, reads and powers down samples the same point of the
 same repeatable burn-in curve every time. Early builds of this project
 returned a byte-identical 5684.846 ohms on every cycle for hours, which
 looked like a working sensor and was nothing of the kind.
+
+### Reading the air figure
+
+The detail view shows air quality as a **signed deviation from the
+learned baseline**: `Air +15% clean` means 15% above normal, `Air -50%
+POOR` means half of it. The bar carries a tick at the baseline so
+"normal" is visible rather than implied.
+
+It is shown this way because the underlying quantity is
+resistance-over-baseline, and BME688 resistance *rises* in clean air. As
+a raw percentage that produced readings like "115% clean", which reads
+like a fault rather than good news.
+
+Expect a positive drift during long continuous runs: the sensor's
+resistance climbs as it conditions, and the baseline is deliberately slow
+to follow, so you are partly watching burn-in rather than air quality.
+What matters is a sharp *fall*.
 
 So `GAS_WARMUP_S` (default 300) gates it: until the heater has run that
 long, `gas` is withheld, the baseline does not learn, no gas alert can

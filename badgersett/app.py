@@ -19,7 +19,7 @@ import machine
 import config
 
 from . import alerts as alert_rules
-from . import metoffice, net, news, nws, power, sensor, ui, util, weather as weather_api
+from . import clock, metoffice, net, news, nws, power, sensor, ui, util, weather as weather_api
 from .haptics import Haptics
 from .sensor import Sensor
 from .state import State
@@ -71,37 +71,6 @@ def _wake_buttons(display):
     return pressed
 
 
-def _set_clock(weather):
-    """Seed both RTCs from the forecast timestamp — no NTP round trip needed."""
-    parsed = util.parse_iso(weather.get("time") or "")
-    if not parsed:
-        return
-    year, month, day, hour, minute = parsed
-    try:
-        machine.RTC().datetime((year, month, day, 0, hour, minute, 0, 0))
-        badger2040.pico_rtc_to_pcf()
-        util.log("clock set to %04d-%02d-%02d %02d:%02d" % parsed)
-    except Exception as exc:
-        util.log("clock set failed:", exc)
-
-
-def _now():
-    try:
-        stamp = machine.RTC().datetime()
-        return stamp[4], stamp[5], stamp   # hour, minute, full tuple
-    except Exception:
-        return None, None, None
-
-
-def _minutes_stamp():
-    """A monotonic-ish minute counter for the pressure history."""
-    try:
-        stamp = machine.RTC().datetime()
-        return ((stamp[0] * 365 + stamp[1] * 31 + stamp[2]) * 24 + stamp[4]) * 60 + stamp[5]
-    except Exception:
-        return int(time.time() // 60)
-
-
 def _refresh_network():
     """Fetch forecast, official warnings and headlines.
 
@@ -115,10 +84,17 @@ def _refresh_network():
     if not link:
         return None, None, None
 
+    # Time first, while the link is definitely up. NTP gives UTC; the
+    # local offset arrives with the forecast a moment later.
+    clock.sync_ntp()
+
     forecast = official = headlines = None
     try:
         forecast = weather_api.fetch(config.LATITUDE, config.LONGITUDE,
                                      getattr(config, "TIMEZONE", "auto"))
+        if forecast:
+            clock.apply_utc_offset(forecast.get("utc_offset"))
+            clock.persist()
         gc.collect()
         source = getattr(config, "ALERT_SOURCE", "none").lower()
         if source == "metoffice":
@@ -145,6 +121,10 @@ def run():
 
     state = State()
     screen = ui.UI(display, config)
+
+    # The RP2040's clock is wiped by every power cut; the PCF85063A keeps
+    # running on its own. Restore from it before deciding anything.
+    clock.restore()
 
     i2c = None
     bme = haptic = None
@@ -205,21 +185,23 @@ def run():
         if indoor:
             state.update_gas_baseline(indoor.get("gas"),
                                       getattr(config, "GAS_BASELINE_SAMPLES", 20))
-            state.push_pressure(indoor.get("pressure"), _minutes_stamp())
+            state.push_pressure(indoor.get("pressure"), clock.minutes())
             state.set("indoor", indoor)
         else:
             indoor = state.get("indoor")
 
-        # -- network: only on a timed wake, first boot, or UP ------------
-        timed_wake = True
-        try:
-            timed_wake = badger2040.woken_by_rtc()
-        except Exception:
-            pass
-
+        # -- network: driven by how old the data is --------------------
+        # Deliberately NOT badger2040.woken_by_rtc(): that reports the
+        # reason for the *power-on*, so on USB - where sleep_for() cannot
+        # actually cut power - it stays False forever and nothing ever
+        # refreshes. Worse, the clock is only set by a refresh, so the two
+        # deadlock and the badge sits with a frozen timestamp.
+        refresh_minutes = max(1, int(getattr(config, "REFRESH_MINUTES", 30)))
         cached = state.get("weather")
-        want_network = force_refresh or cached is None or (
-            timed_wake and not (buttons and getattr(config, "SENSOR_ONLY_ON_BUTTON", True)))
+        stale = clock.is_stale(state.get("last_refresh"), refresh_minutes)
+        want_network = force_refresh or cached is None or stale
+        if buttons and not getattr(config, "SENSOR_ONLY_ON_BUTTON", True):
+            want_network = True
 
         forecast, official = cached, None
         headlines = state.get("news") or []
@@ -232,8 +214,11 @@ def run():
             if fresh:
                 forecast = fresh
                 state.set("weather", fresh)
-                state.set("updated", fresh.get("time"))
-                _set_clock(fresh)
+                # The time we actually fetched, from the freshly synced
+                # clock - not the forecast's own timestamp, which Open-Meteo
+                # quantises to 15-minute buckets.
+                state.set("updated", clock.hhmm())
+                state.set("last_refresh", clock.minutes())
             if fresh_news:
                 headlines = fresh_news
                 state.set("news", fresh_news)
@@ -242,13 +227,13 @@ def run():
 
         # -- alerts ------------------------------------------------------
         current = alert_rules.evaluate(config, forecast, indoor, state, official)
-        hour, minute, _ = _now()
-        alert_rules.notify(config, current, state, haptic, hour)
+        alert_rules.notify(config, current, state, haptic, clock.hour())
 
         # -- draw --------------------------------------------------------
         updated = state.get("updated")
-        if updated and "T" in updated:
-            updated = "Updated " + updated.split("T")[1][:5]
+        if updated and "T" in updated:           # older state files
+            updated = updated.split("T")[1][:5]
+        updated = "Updated " + updated if updated else None
         credit = "Open-Meteo"
         source = getattr(config, "ALERT_SOURCE", "none").lower()
         if source == "metoffice":

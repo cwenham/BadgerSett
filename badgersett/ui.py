@@ -336,7 +336,10 @@ class UI:
                         verdict = "elevated"
                     else:
                         verdict = "POOR"
-                    rows.append("Air %d%%  %s" % (round(ratio * 100), verdict))
+                    # Shown as a signed deviation from the learned normal:
+                    # 0% is normal, positive is cleaner than usual, negative
+                    # is worse. "115%" next to "clean" reads like a fault.
+                    rows.append("Air %+d%%  %s" % (round((ratio - 1.0) * 100), verdict))
 
             y = 48
             for text in rows[:5]:
@@ -351,6 +354,11 @@ class UI:
                 d.rectangle(COL2_X + 1, 101, bar_w - 2, 7)
                 d.set_pen(BLACK)
                 d.rectangle(COL2_X + 1, 101, max(fill - 1, 0), 7)
+                # Tick at the baseline, so "normal" is visible on the bar
+                # rather than being an invisible reference point.
+                tick = COL2_X + int(bar_w / 1.2)
+                d.rectangle(tick, 97, 1, 3)
+                d.rectangle(tick, 110, 1, 3)
         else:
             d.set_font("bitmap6")
             d.text("Sensor not", COL2_X, 48, scale=1)

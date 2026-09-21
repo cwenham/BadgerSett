@@ -164,10 +164,28 @@ def install_fakes():
     machine = types.ModuleType("machine")
 
     class RTC:
+        # Settable, so clock code can be exercised properly.
+        _dt = [2026, 9, 20, 0, 17, 15, 0, 0]
+
         def datetime(self, value=None):
-            return (2026, 9, 20, 0, 17, 15, 0, 0)
+            if value is not None:
+                RTC._dt = list(value)
+                return None
+            return tuple(RTC._dt)
 
     machine.RTC = RTC
+
+    # On MicroPython time.time() is derived from the RTC. Model that, or
+    # clock code that converts between them cannot be tested honestly.
+    # localtime==gmtime there too: no timezone database on the badge.
+    import calendar
+
+    def _rtc_time():
+        d = RTC._dt
+        return calendar.timegm((d[0], d[1], d[2], d[4], d[5], d[6], 0, 0, 0))
+
+    time.time = _rtc_time
+    time.localtime = time.gmtime
     class _Pin:
         IN = 0
         OUT = 1
@@ -241,6 +259,19 @@ def install_fakes():
     bme_mod.BreakoutBME68X = BreakoutBME68X
     bme_mod.STATUS_HEATER_STABLE = 0x10
     sys.modules["breakout_bme68x"] = bme_mod
+
+    ntp = types.ModuleType("ntptime")
+    ntp.host = "pool.ntp.org"
+    ntp.calls = []
+
+    def _settime():
+        ntp.calls.append(ntp.host)
+        if getattr(ntp, "fail", False):
+            raise OSError("ntp timeout")
+        machine.RTC().datetime((2026, 9, 20, 0, 16, 15, 0, 0))   # UTC
+
+    ntp.settime = _settime
+    sys.modules["ntptime"] = ntp
 
     urequests = types.ModuleType("urequests")
     urequests.get = lambda *a, **kw: (_ for _ in ()).throw(
@@ -645,6 +676,24 @@ def test_layouts():
     check("attribution stays on the panel", not display.out_of_bounds,
           display.out_of_bounds[:2])
     texts = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    display = FakeDisplay()
+    clean = dict(SAMPLE_INDOOR, gas=138000.0, gas_raw=138000.0)   # 115% of baseline
+    st.set("gas_baseline", 120000.0)
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, clean, st, [], status)
+    air = [str(c[1][0]) for c in display.calls
+           if c[0] == "text" and str(c[1][0]).startswith("Air")]
+    check("air is shown as a signed deviation, not a >100% figure",
+          air and air[0].startswith("Air +15%"), air)
+    dirty = dict(SAMPLE_INDOOR, gas=60000.0, gas_raw=60000.0)     # 50%
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, dirty, st, [], status)
+    air = [str(c[1][0]) for c in display.calls
+           if c[0] == "text" and str(c[1][0]).startswith("Air")]
+    check("a drop reads as a negative deviation and POOR",
+          air and air[0].startswith("Air -50%") and "POOR" in air[0], air)
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, SAMPLE_INDOOR, st, [], status)
+
     check("detail view shows outside and inside together",
           "OUTSIDE" in texts and "INSIDE" in texts and "Humidity" in texts
           and "Gusts" in texts, texts[:90])
@@ -1057,6 +1106,59 @@ def test_power_detection():
     machine_mod.Pin = broken
 
 
+def test_clock():
+    print("\nclock and refresh scheduling")
+    from badgersett import clock
+    rtc = sys.modules["machine"].RTC()
+    ntp = sys.modules["ntptime"]
+
+    rtc.datetime((2026, 9, 20, 0, 17, 15, 0, 0))
+    check("a 2026 clock counts as set", clock.is_set())
+    check("hhmm reads the RTC", clock.hhmm() == "17:15", clock.hhmm())
+    check("hour reads the RTC", clock.hour() == 17, clock.hour())
+
+    rtc.datetime((2000, 1, 1, 0, 11, 15, 0, 0))
+    check("an unset 2000 clock is not 'set'", not clock.is_set())
+    check("minutes() is None with no clock", clock.minutes() is None)
+    check("hour() is None with no clock", clock.hour() is None)
+
+    # The bug that froze the badge: unknown state must mean "refresh now".
+    check("no clock means a refresh is due", clock.is_stale(1000, 30))
+    check("no record of a refresh means one is due", clock.is_stale(None, 30))
+
+    rtc.datetime((2026, 9, 20, 0, 17, 15, 0, 0))
+    now = clock.minutes()
+    check("minutes() works once set", now is not None)
+    check("just refreshed is not stale", not clock.is_stale(now, 30))
+    check("29 minutes ago is not stale", not clock.is_stale(now - 29, 30))
+    check("30 minutes ago is stale", clock.is_stale(now - 30, 30))
+    check("a backwards clock jump forces a refresh",
+          clock.is_stale(now + 5000, 30))
+
+    ntp.calls[:] = []
+    ntp.fail = False
+    check("NTP sync succeeds and sets the clock", clock.sync_ntp())
+    check("NTP was asked of a real host",
+          ntp.calls and "ntp" in ntp.calls[0], ntp.calls)
+    check("the RTC now holds the NTP (UTC) time",
+          clock.hhmm() == "16:15", clock.hhmm())
+
+    check("UTC+1 shifts the clock to local", clock.apply_utc_offset(3600))
+    check("local time is an hour ahead of UTC", clock.hhmm() == "17:15",
+          clock.hhmm())
+    check("a zero offset is a no-op", not clock.apply_utc_offset(0))
+
+    ntp.fail = True
+    ntp.calls[:] = []
+    check("every NTP host is tried before giving up",
+          clock.sync_ntp() is False and len(ntp.calls) == len(clock.NTP_HOSTS),
+          ntp.calls)
+    check("a failed sync leaves the clock alone, not wrong",
+          clock.hhmm() == "17:15", clock.hhmm())
+    ntp.fail = False
+    rtc.datetime((2026, 9, 20, 0, 17, 15, 0, 0))
+
+
 def test_buttons():
     print("\nbutton mapping and the secret chord")
     from badgersett import app
@@ -1194,8 +1296,10 @@ def test_app_cycle():
           (saved.get("weather") or {}).get("temp") == 19.7, saved.get("weather"))
     check("indoor reading cached",
           (saved.get("indoor") or {}).get("humidity") == 47.0, saved.get("indoor"))
-    check("update timestamp recorded", saved.get("updated") == "2026-09-20T17:15",
-          saved.get("updated"))
+    check("update timestamp is the real local clock, not the forecast's",
+          saved.get("updated") == "17:15", saved.get("updated"))
+    check("refresh time recorded for staleness checks",
+          saved.get("last_refresh") is not None, saved.get("last_refresh"))
     latched = sorted((saved.get("alerts") or {}).keys())
     check("forecast rules and Met Office warnings latch together",
           latched == ["met:rain", "met:wind", "wx:code:96", "wx:gust"], latched)
@@ -1227,6 +1331,7 @@ def main():
     test_wrap()
     test_gas_warmup_gate()
     test_power_detection()
+    test_clock()
     test_buttons()
     test_layouts()
     test_app_cycle()
