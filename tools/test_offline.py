@@ -200,7 +200,7 @@ def install_fakes():
     machine.Pin = _Pin
 
     class _ADC:
-        value = 29790            # ~4.50 V on VSYS
+        value = 31774            # ~4.80 V on VSYS: USB, as the badge sits on the bench
         def __init__(self, channel):
             pass
 
@@ -1123,29 +1123,48 @@ def test_gas_warmup_gate():
           "usb only" in drawn.lower(), drawn[-70:])
 
 
+def set_supply(volts):
+    """Put the fake VSYS at `volts` (USB ~4.8, a LiPo 3.0-4.2)."""
+    sys.modules["machine"].ADC.value = int(volts / (3 * 3.3) * 65535)
+
+
 def test_power_detection():
     print("\npower source detection")
     from badgersett import power
     machine_mod = sys.modules["machine"]
+    WLAN = sys.modules["network"].WLAN
+    WLAN.is_active = False
 
+    set_supply(4.8)
+    check("4.8V on VSYS reads as USB", power.on_usb() is True)
+    set_supply(3.9)
+    check("a LiPo's 3.9V reads as battery", power.on_usb() is False)
+    set_supply(4.2)
+    check("a full LiPo at 4.2V is still battery", power.on_usb() is False)
+
+    # With the radio up VSYS cannot be read, so WL_GPIO2 is the fallback.
+    WLAN.is_active = True
     machine_mod.Pin.usb_present = 1
-    check("USB detected when VBUS is high", power.on_usb() is True)
+    check("radio up: falls back to VBUS sense (USB)", power.on_usb() is True)
     machine_mod.Pin.usb_present = 0
-    check("battery detected when VBUS is low", power.on_usb() is False)
+    check("radio up: falls back to VBUS sense (battery)", power.on_usb() is False)
     machine_mod.Pin.usb_present = 1
 
     broken = machine_mod.Pin
 
     class Exploding:
         IN = 0
+        OUT = 1
 
         def __init__(self, *a, **kw):
             raise RuntimeError("no such pin")
 
     machine_mod.Pin = Exploding
-    check("an unreadable VBUS pin assumes USB rather than crashing",
+    check("with nothing readable it assumes USB (only costs power now)",
           power.on_usb() is True)
     machine_mod.Pin = broken
+    WLAN.is_active = False
+    set_supply(4.8)
 
 
 def test_wifi_selection():
@@ -1263,11 +1282,11 @@ def test_power_modes():
     for mode, usb, expected in (("awake", 0, True), ("awake", 1, True),
                                 ("sleep", 0, False), ("sleep", 1, False),
                                 ("auto", 1, True), ("auto", 0, False)):
-        Pin.usb_present = usb
+        set_supply(4.8 if usb else 3.9)
         check("%s on %s -> %s" % (mode, "USB" if usb else "battery",
                                   "awake" if expected else "sleep"),
               app._stay_awake(mode) is expected)
-    Pin.usb_present = 1
+    set_supply(4.8)
 
     CONFIG.POWER_MODE = "nonsense"
     check("an unknown POWER_MODE falls back to auto", app._power_mode() == "auto")
@@ -1323,19 +1342,19 @@ def test_power_modes():
 
         calm = StubBME(dict(SAMPLE_INDOOR))
         app._last_attempt = None
-        reason, pressed = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        reason, pressed, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
         check("with nothing happening it wakes for the redraw timer",
               reason == "redraw", reason)
         check("it sampled the sensor repeatedly to keep the heater warm",
               calm.reads >= 50, calm.reads)      # 5 min / 5 s = 60
 
-        reason, pressed = app._awake_wait(
+        reason, pressed, _ = app._awake_wait(
             ScriptedDisplay([(), (), ("C",), ()] + [()] * 20), calm, st, log, 30)
         check("a button press ends the wait early", reason == "button", reason)
         check("the button is handed back to the main loop", pressed == ["C"], pressed)
 
         # A tap so brief it is gone by the time collection starts.
-        reason, pressed = app._awake_wait(
+        reason, pressed, _ = app._awake_wait(
             ScriptedDisplay([(), ("B",)] + [()] * 30), calm, st, log, 30)
         check("even a very brief tap is not lost", pressed == ["B"], (reason, pressed))
 
@@ -1343,37 +1362,146 @@ def test_power_modes():
             st.update_gas_baseline(120000.0, 20)
         st.set("alerts", {})
         smoky = StubBME(dict(SAMPLE_INDOOR, gas=30000.0, gas_raw=30000.0))
-        reason, _ = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
-        check("a gas drop wakes it immediately", reason == "alert", reason)
-        check("...on the very first sample", smoky.reads == 1, smoky.reads)
+        reason, _, carried = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
+        check("a gas drop wakes it", reason == "alert", reason)
+        check("...once confirmed by a second sample, not on one noisy reading",
+              smoky.reads == 2, smoky.reads)
+        check("the triggering reading is handed back to the main loop",
+              carried and carried["gas"] == 30000.0, carried)
+
+        class Blip:
+            ok = True
+
+            def __init__(self):
+                self.reads = 0
+
+            def read(self, **kw):
+                self.reads += 1
+                gas = 30000.0 if self.reads == 1 else 120000.0   # one bad sample
+                return dict(SAMPLE_INDOOR, gas=gas, gas_raw=gas)
+
+        st.set("alerts", {})
+        reason, _, _ = app._awake_wait(ScriptedDisplay([()]), Blip(), st, log, 30)
+        check("a single noisy sample does not wake it", reason == "redraw", reason)
 
         # Once latched, the same alert must not keep firing, or the e-ink
         # would be redrawn every five seconds for as long as it persists.
         st.set("alerts", {"in:gas": 3})
-        reason, _ = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
+        reason, _, _ = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
         check("an already-latched alert does not re-trigger", reason == "redraw", reason)
 
         st.set("alerts", {})
         st.set("last_refresh", None)                  # due
         app._last_attempt = None
-        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        reason, _, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
         check("a due refresh wakes it", reason == "refresh", reason)
 
         # Just tried and failed: must NOT spin on the radio. The redraw timer
         # is set shorter than RETRY_S so the two cannot expire together.
         CONFIG.AWAKE_REDRAW_MINUTES = 2
         app._last_attempt = vt.ticks_ms()
-        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        reason, _, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
         check("after a failed attempt it backs off instead of retrying at once",
               reason == "redraw", reason)
         CONFIG.AWAKE_REDRAW_MINUTES = 5
         vt.now += app.RETRY_S * 1000
-        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        reason, _, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
         check("...and retries once RETRY_S has passed", reason == "refresh", reason)
         os.remove(st_path) if os.path.exists(st_path) else None
     finally:
         app.time = real_time
         app._last_attempt = None
+
+
+def test_redraw_flipflop():
+    print("\nregression: the ~28 second redraw loop")
+    from badgersett import app, runlog as runlog_mod
+
+    class CadenceBME:
+        """A gas channel whose value depends on how it is sampled, as the
+        real BME688's does: a burst of heater pulses reads high, a single
+        paced sample reads several times lower."""
+        ok = True
+
+        def __init__(self):
+            self.burst_reads = 0
+
+        def read(self, samples=4, settle=0.35, warmup=None, gas_enabled=True):
+            if samples > 1:
+                self.burst_reads += 1
+            gas = 76000.0 if samples > 1 else 17000.0
+            return dict(SAMPLE_INDOOR, gas=gas, gas_raw=gas,
+                        gas_trusted=True, gas_reason="ok")
+
+    class Quiet(FakeDisplay):
+        def pressed(self, pin):
+            return False
+
+    class Haptic:
+        ready = True
+
+        def __init__(self):
+            self.played = []
+
+        def alert(self, level):
+            self.played.append(level)
+
+    vt = VirtualTime()
+    real_time = app.time
+    app.time = vt
+    log = runlog_mod.RunLog(enabled=False)
+
+    def fresh_state():
+        state_mod.PATH = "/tmp/badgersett_flipflop.json"
+        if os.path.exists(state_mod.PATH):
+            os.remove(state_mod.PATH)
+        st = state_mod.State()
+        from badgersett import clock
+        st.set("weather", dict(SAMPLE_WEATHER))
+        st.set("last_refresh", clock.minutes())
+        # The baseline the main loop learned from its own burst readings.
+        st.set("gas_baseline", 76000.0)
+        st.set("gas_n", 20)
+        return st
+
+    def run_cycles(judge, cycles=12):
+        st, bme, hap = fresh_state(), CadenceBME(), Haptic()
+        reasons, carried = [], None
+        for _ in range(cycles):
+            reason, _, carried = app._awake_wait(Quiet(), bme, st, log, 30)
+            reasons.append(reason)
+            reading = judge(bme, carried)
+            current = alerts.evaluate(CONFIG, None, reading, st, None)
+            alerts.notify(CONFIG, current, st, hap, hour=12)
+        return reasons, hap.played, bme
+
+    try:
+        # How it was: the main loop took its own (burst) reading.
+        before, buzzes, _ = run_cycles(lambda bme, carried: bme.read())
+        check("REPRODUCED: judging a different reading woke it every cycle",
+              before.count("alert") == len(before), before)
+        check("...silently - the main loop never agreed, so it never buzzed",
+              buzzes == [], buzzes)
+
+        # Now: the main loop judges the awake loop's own reading.
+        after, buzzes, bme = run_cycles(
+            lambda bme, carried: app._indoor_reading(bme, True, carried))
+        check("FIXED: the alert fires once and then stays latched",
+              after[0] == "alert" and after[1:].count("alert") == 0, after)
+        check("...the rest are ordinary timed redraws",
+              after[1:] == ["redraw"] * (len(after) - 1), after)
+        check("...and it buzzes once, as a real alert should", buzzes == [3], buzzes)
+        check("awake, the main loop takes no burst reading of its own",
+              bme.burst_reads == 0, bme.burst_reads)
+
+        check("with nothing carried (first pass after boot) it reads normally",
+              app._indoor_reading(CadenceBME(), True, None)["gas"] == 76000.0)
+        check("asleep, it always reads fresh",
+              app._indoor_reading(CadenceBME(), False, {"gas": 1})["gas"] == 76000.0)
+    finally:
+        app.time = real_time
+        if os.path.exists(state_mod.PATH):
+            os.remove(state_mod.PATH)
 
 
 def test_battery_cutoff():
@@ -1387,16 +1515,23 @@ def test_battery_cutoff():
     def volts(v):
         ADC.value = int(v / (3 * 3.3) * 65535)
 
-    Pin.usb_present = 0
     volts(3.9)
     check("a healthy battery is left alone", app._battery_low() is None)
+    volts(4.8)
+    check("USB's 4.8V never trips it", app._battery_low() is None)
     volts(3.1)
     low = app._battery_low()
     check("below the cutoff it reports the voltage", low is not None and low < 3.2, low)
-    Pin.usb_present = 1
-    check("on USB the cutoff never fires, whatever VSYS says",
-          app._battery_low() is None)
-    Pin.usb_present = 0
+
+    # The bug: on_usb() returned True whenever the VBUS pin could not be
+    # read, and the cutoff trusted it - silently switching itself off.
+    broken = sys.modules["machine"].Pin
+    real_on_usb = __import__("badgersett.power", fromlist=["on_usb"]).on_usb
+    import badgersett.power as power_mod
+    power_mod.on_usb = lambda: True          # "I think this is USB"
+    check("REGRESSION: a wrong 'on USB' answer can no longer disable the cutoff",
+          app._battery_low() is not None)
+    power_mod.on_usb = real_on_usb
     CONFIG.LOW_BATTERY_V = None
     check("LOW_BATTERY_V = None disables it", app._battery_low() is None)
     CONFIG.LOW_BATTERY_V = 3.2
@@ -1441,8 +1576,7 @@ def test_battery_cutoff():
     check("it leaves a BATTERY LOW message on the e-ink", "BATTERY LOW" in drawn, drawn[:60])
     check("the message says this board cannot charge it",
           "cannot charge" in drawn, drawn[-120:])
-    Pin.usb_present = 1
-    volts(4.5)
+    volts(4.8)
     os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
 
 
@@ -1495,7 +1629,7 @@ def test_runlog():
 
     WLAN.is_active = False
     check("VSYS reads when the radio is off", power.vsys() is not None, power.vsys())
-    check("VSYS is converted to volts", 4.3 < power.vsys() < 4.7, power.vsys())
+    check("VSYS is converted to volts", 4.6 < power.vsys() < 5.0, power.vsys())
     WLAN.is_active = True
     check("VSYS refuses while the radio is on", power.vsys() is None)
     WLAN.is_active = False
@@ -1761,6 +1895,7 @@ def main():
     test_power_detection()
     test_wifi_selection()
     test_power_modes()
+    test_redraw_flipflop()
     test_battery_cutoff()
     test_gas_gap_reset()
     test_pressure_spacing()

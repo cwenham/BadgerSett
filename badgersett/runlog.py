@@ -2,7 +2,12 @@
 
 Appends a line to runtime.log on each boot and then every few minutes:
 
-    2026-09-22 14:10 beat  up=125m vsys=3.912 mode=awake gas=ok
+    2026-09-22 14:10 beat  up=125m vsys=3.912 mode=awake gas=ok wakes=redraw:2
+
+`wakes` counts why the awake loop ended since the previous heartbeat. A
+healthy awake badge shows about two timed redraws per ten minutes; a
+large "alert" or "refresh" count means something is waking it that
+should not be, and costing battery while it does.
 
 `up` is time since this boot and `vsys` the supply voltage, so the last
 line written before the battery gives out records both how long it ran
@@ -88,6 +93,9 @@ class RunLog:
             time.ticks_diff(now, self._last_beat) >= self.every_ms
 
     def maybe_beat(self, **extra):
+        """Write a heartbeat if one is due. Returns True if it wrote."""
         if self.enabled and self.heartbeat_due():
             self._last_beat = time.ticks_ms()
             self.write("beat", **extra)
+            return True
+        return False

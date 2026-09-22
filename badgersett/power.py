@@ -12,14 +12,28 @@ from . import util
 
 _USB_PIN = "WL_GPIO2"
 
+# USB puts VSYS at about 4.8V. A LiPo never exceeds ~4.2V and two AAAs sit
+# near 3V, so anything above this is USB. (Three fresh alkaline AAs can
+# reach 4.8V and would be mistaken for USB - an unusual way to run this.)
+USB_VSYS_V = 4.5
+
 
 def on_usb():
     """True when running from USB, False on battery.
 
-    Returns True if the check itself fails: the callers use this to decide
-    whether to spend power, and on an unknown supply the safer assumption
-    is the one that does not silently disable a feature the user can see.
+    VSYS is the primary signal. WL_GPIO2 - the Pico W's VBUS sense, which
+    lives on the WiFi chip rather than the RP2040 - is only the fallback,
+    used while the radio is up and VSYS cannot be read. The WiFi chip is
+    shut down after every refresh, and a pin on a powered-down chip is not
+    something to base a decision about a battery on.
+
+    Nothing safety-critical depends on this any more: the low-battery
+    cutoff reads the voltage directly. This only decides whether "auto"
+    mode stays awake, so on a failed read, assuming USB merely costs power.
     """
+    volts = vsys()
+    if volts is not None:
+        return volts > USB_VSYS_V
     try:
         return bool(machine.Pin(_USB_PIN, machine.Pin.IN).value())
     except Exception as exc:

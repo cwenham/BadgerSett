@@ -97,18 +97,33 @@ def _network_due(state, refresh_minutes):
 
 
 def _battery_low():
-    """Supply voltage if we are on battery and below LOW_BATTERY_V, else None.
+    """Supply voltage if it is below LOW_BATTERY_V, else None.
 
     The Badger 2040 W has no charging circuit and no cutoff of its own: it
-    will run until the supply sags to about 2.7V, which is below the ~3.0V
-    where a LiPo cell starts to be damaged. This is the only thing standing
+    will run until the supply sags to about 2.7V, below the ~3.0V where a
+    LiPo cell starts to be damaged. This is the only thing standing
     between an unattended run-to-empty and a ruined battery.
+
+    It deliberately does NOT ask whether we are on USB. An earlier version
+    did, and power.on_usb() returned True whenever its pin could not be
+    read - which silently disabled the cutoff in exactly the case it
+    exists for. The voltage settles it on its own: USB holds VSYS near
+    4.8V, so a reading under the cutoff cannot be USB.
+
+    Two readings must agree, so one bad ADC sample cannot power off a
+    badge that is actually fine.
     """
     limit = getattr(config, "LOW_BATTERY_V", 3.2)
-    if not limit or power.on_usb():
+    if not limit:
         return None
-    volts = power.vsys()
-    return volts if (volts is not None and volts < limit) else None
+    first = power.vsys()
+    if first is None or first >= limit:
+        return None
+    time.sleep_ms(50)
+    second = power.vsys()
+    if second is None or second >= limit:
+        return None
+    return min(first, second)
 
 
 def _pressed(display, pin):
@@ -154,36 +169,76 @@ def _new_indoor_alert(reading, state):
     return False
 
 
-def _awake_wait(display, bme, state, log, refresh_minutes):
+def _format_wakes(counts):
+    return ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts) if counts[k]) or "none"
+
+
+def _indoor_reading(bme, awake, carried):
+    """The reading the main loop should judge and display.
+
+    Awake, reuse the awake loop's latest sample rather than taking a new
+    one. The gas channel's value depends heavily on how it is sampled: the
+    default read fires four heater pulses in about a second, the awake loop
+    one every GAS_SAMPLE_S seconds, and on hardware those differed several
+    fold. When each loop took its own, the awake loop's cooler reading
+    raised an alert that the main loop's hotter one then cleared - and the
+    badge redrew every ~28 seconds for as long as it ran.
+
+    The first pass after boot has nothing carried yet, and uses the normal
+    multi-sample read, which discards the first conversion after power-up.
+    """
+    if not (bme and bme.ok):
+        return None
+    if awake and carried:
+        return carried
+    return bme.read(gas_enabled=awake)
+
+
+def _awake_wait(display, bme, state, log, refresh_minutes, wakes=None):
     """Stay powered and keep the gas heater conditioned until something
-    deserves a redraw. Returns (reason, buttons).
+    deserves a redraw. Returns (reason, buttons, last_reading).
 
     The heater only fires during a measurement, so conditioning means
     sampling every GAS_SAMPLE_S seconds. Those samples are cheap and do not
     touch the display; the e-ink is only redrawn on the way out.
+
+    An alert must show on two consecutive samples before it ends the wait,
+    so a single noisy reading from a metal-oxide sensor cannot trigger a
+    redraw. The reading that triggered it is handed back, so the main loop
+    judges the same measurement and latches the same alert.
     """
     sample_s = max(2, int(getattr(config, "GAS_SAMPLE_S", 5)))
     redraw_s = max(sample_s, int(getattr(config, "AWAKE_REDRAW_MINUTES", 5)) * 60)
     deadline = time.ticks_add(time.ticks_ms(), redraw_s * 1000)
+    wakes = wakes if wakes is not None else {}
+    last = None
+    confirming = 0
 
     while True:
-        reading = None
         if bme and bme.ok:
             reading = bme.read(samples=1, settle=0, gas_enabled=True)
-            if reading and _new_indoor_alert(reading, state):
-                return "alert", []
-        log.maybe_beat(gas=(reading or {}).get("gas_reason", "n/a"))
+            if reading:
+                last = reading
+                if _new_indoor_alert(reading, state):
+                    confirming += 1
+                    if confirming >= 2:
+                        return "alert", [], last
+                else:
+                    confirming = 0
+        if log.maybe_beat(gas=(last or {}).get("gas_reason", "n/a"),
+                          wakes=_format_wakes(wakes)):
+            wakes.clear()
 
         if _network_due(state, refresh_minutes):
-            return "refresh", []
+            return "refresh", [], last
 
         next_sample = time.ticks_add(time.ticks_ms(), sample_s * 1000)
         while time.ticks_diff(next_sample, time.ticks_ms()) > 0:
             held = [name for pin, name in _BUTTONS if _pressed(display, pin)]
             if held:
-                return "button", _collect_buttons(display, initial=held)
+                return "button", _collect_buttons(display, initial=held), last
             if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
-                return "redraw", []
+                return "redraw", [], last
             time.sleep_ms(40)
 
 
@@ -291,6 +346,8 @@ def run():
                         _power_mode())
     log.write("boot", usb=int(power.on_usb()))
     pending = []
+    carried = None       # the awake loop's latest sample, reused by the main loop
+    wakes = {}           # why the awake loop ended, counted into the runtime log
 
     while True:
         gc.collect()
@@ -350,7 +407,8 @@ def run():
         # heater cycling; a sleeping badge's heater is always cold.
         mode = _power_mode()
         awake = _stay_awake(mode)
-        indoor = bme.read(gas_enabled=awake) if (bme and bme.ok) else None
+        indoor = _indoor_reading(bme, awake, carried)
+        carried = None
         if indoor:
             state.update_gas_baseline(indoor.get("gas"),
                                       getattr(config, "GAS_BASELINE_SAMPLES", 20))
@@ -436,7 +494,9 @@ def run():
             haptic.standby()
 
         if awake:
-            reason, pending = _awake_wait(display, bme, state, log, refresh_minutes)
+            reason, pending, carried = _awake_wait(display, bme, state, log,
+                                                   refresh_minutes, wakes)
+            wakes[reason] = wakes.get(reason, 0) + 1
             util.log("awake: redrawing for", reason, pending or "")
             continue
 
