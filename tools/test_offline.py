@@ -1821,8 +1821,36 @@ def test_scanner_screens():
     check("an empty scan stays on the panel", not display.out_of_bounds)
 
     display = FakeDisplay()
-    ui.UI(display, CONFIG).scan_radar([], dict(status), None)
+    ui.UI(display, CONFIG).scan_radar([], 0, dict(status), None)
     check("an empty radar renders", display.calls and not display.out_of_bounds)
+
+    # The radar's side list must page too: it used to ignore the page
+    # entirely, so DOWN redrew an identical screen.
+    check("the two modes have their own page sizes",
+          ui.rows_for("radar") == ui.RADAR_ROWS and ui.rows_for("list") == ui.SCAN_ROWS)
+
+    def radar_text(page):
+        d = FakeDisplay()
+        ui.UI(d, CONFIG).scan_radar(entries, page, dict(status), 5)
+        return " ".join(str(c[1][0]) for c in d.calls if c[0] == "text"), d
+
+    first, d0 = radar_text(0)
+    second, d1 = radar_text(1)
+    check("radar page 1 lists the strongest", "PowerStation-42" in first, first[:60])
+    check("radar page 2 lists different devices",
+          "PowerStation-42" not in second and second != first, second[:60])
+    check("radar shows which page it is on", "1/" in first and "2/" in second,
+          (first[:40], second[:40]))
+    check("radar page 2 labels the rank range", "#7-12" in second, second[:50])
+    check("both radar pages stay on the panel",
+          not d0.out_of_bounds and not d1.out_of_bounds,
+          (d0.out_of_bounds[:1], d1.out_of_bounds[:1]))
+    check("the listed devices are ringed on the plot",
+          len([c for c in d0.calls if c[0] == "rectangle"]) >
+          len([c for c in FakeDisplay().calls if c[0] == "rectangle"]))
+
+    last, _ = radar_text(99)
+    check("a radar page past the end is clamped", "PowerStation-42" not in last)
 
     # The radar must sit centred in its box, left of the divider.
     x0, y0, x1, y1 = ui.RADAR_BOX
@@ -1977,6 +2005,23 @@ def test_secret_screen_flow():
         check("B switches to the radar",
               state_mod.State().get("scan_mode") == "radar" and "RADAR" in drawn,
               (state_mod.State().get("scan_mode"), drawn[:40]))
+        # The reported bug: on the radar, DOWN redrew an identical screen.
+        # Set the mode outright rather than toggling, so this does not
+        # depend on which mode the presses above happened to leave.
+        setup = state_mod.State()
+        setup.set("scan_mode", "radar")
+        setup.set("scan_page", 0)
+        setup.save()
+        radar_first = press([])                     # draw radar page 1
+        radar_second = press(["DOWN"])              # page 2
+        check("DOWN on the radar changes what is drawn",
+              radar_second != radar_first, (radar_first[:50], radar_second[:50]))
+        check("...and moves to the next page of devices",
+              state_mod.State().get("scan_page") == 1,
+              state_mod.State().get("scan_page"))
+        check("the radar still draws the radar", "RADAR" in radar_second,
+              radar_second[:40])
+
         drawn = press(["B"])
         check("B switches back to the list",
               state_mod.State().get("scan_mode") == "list" and "SCAN" in drawn)

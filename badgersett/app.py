@@ -495,11 +495,15 @@ def run():
                 display.led(0)
                 stamp = int(time.time()) if clock.is_set() else None
                 scan.save(entries, stamp)
-            pages = max(1, (len(entries) + ui.SCAN_ROWS - 1) // ui.SCAN_ROWS)
+            mode = state.get("scan_mode") or "list"
+            # The two modes fit different numbers of rows, so the page count
+            # follows the mode. The modulo also re-seats a page that is past
+            # the end after switching from the roomier list to the radar.
+            rows = ui.rows_for(mode)
+            pages = max(1, (len(entries) + rows - 1) // rows)
             page = ((state.get("scan_page") or 0) + page_delta) % pages
             state.set("scan_page", page)
-            scan_data = (entries, page, state.get("scan_mode") or "list",
-                         _scan_age(stamp))
+            scan_data = (entries, page, mode, _scan_age(stamp))
 
         # -- draw --------------------------------------------------------
         updated = state.get("updated")

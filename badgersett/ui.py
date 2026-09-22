@@ -32,6 +32,7 @@ COL2_X = 152                    # left edge of the "inside" column on the detail
 DIVIDER_X = 145
 
 SCAN_ROWS = 8                   # rows per page on the scanner list
+RADAR_ROWS = 6                  # rows beside the radar - fewer, it is narrower
 
 # The radar's box: everything left of the divider, between the header bar
 # and the footer hints. Centre and radius are derived from it rather than
@@ -41,7 +42,12 @@ RADAR_CX = (RADAR_BOX[0] + RADAR_BOX[2]) // 2
 RADAR_CY = (RADAR_BOX[1] + RADAR_BOX[3]) // 2
 RADAR_R = min((RADAR_BOX[2] - RADAR_BOX[0]) // 2,
               (RADAR_BOX[3] - RADAR_BOX[1]) // 2)
-SCAN_PANEL_X = 132              # the "strongest" list beside the radar
+SCAN_PANEL_X = 132              # the device list beside the radar
+
+
+def rows_for(mode):
+    """Entries per page, which differs between the two scanner modes."""
+    return RADAR_ROWS if mode == "radar" else SCAN_ROWS
 VIEW_BADGE, VIEW_DETAIL, VIEW_NEWS, VIEW_SECRET = 0, 1, 2, 3
 VIEW_NAMES = ("BADGE", "DETAIL", "NEWS", "SECRET")
 
@@ -466,7 +472,7 @@ class UI:
             d.text(stamp, WIDTH - d.measure_text(stamp, 1) - 4, 112, scale=1)
         return page
 
-    def scan_radar(self, entries, status, age):
+    def scan_radar(self, entries, page, status, age):
         """Signal strength as distance: the closer to the middle, the louder.
 
         Bearing is a stable hash of the name, not a real direction - a
@@ -476,7 +482,11 @@ class UI:
         d = self.d
         self._clear()
         wifi = sum(1 for e in entries if e.get("k") == "W")
-        self._header("RADAR", "%dW %dB" % (wifi, len(entries) - wifi))
+        pages = max(1, (len(entries) + RADAR_ROWS - 1) // RADAR_ROWS)
+        page = max(0, min(page, pages - 1))
+        shown = entries[page * RADAR_ROWS:(page + 1) * RADAR_ROWS]
+        self._header("RADAR", "%dW %dB  %d/%d" % (wifi, len(entries) - wifi,
+                                                  page + 1, pages))
 
         cx, cy, radius = RADAR_CX, RADAR_CY, RADAR_R
         d.set_pen(BLACK)
@@ -504,13 +514,22 @@ class UI:
                 d.pixel(x, y)
                 d.pixel(x + 1, y)
                 d.pixel(x, y + 1)
+            if entry in shown:
+                # Ring the devices named in the list beside it, so paging
+                # shows which dots you are looking at.
+                d.rectangle(x - 3, y - 3, 7, 1)
+                d.rectangle(x - 3, y + 3, 7, 1)
+                d.rectangle(x - 3, y - 3, 1, 7)
+                d.rectangle(x + 3, y - 3, 1, 7)
 
         d.set_font("bitmap6")
         left = SCAN_PANEL_X
         d.rectangle(RADAR_BOX[2], RADAR_BOX[1], 1, RADAR_BOX[3] - RADAR_BOX[1])
-        d.text("STRONGEST", left, 20, scale=1)
+        first = page * RADAR_ROWS + 1
+        d.text("STRONGEST" if page == 0 else "#%d-%d" % (first, first + len(shown) - 1),
+               left, 20, scale=1)
         y = 32
-        for entry in entries[:6]:
+        for entry in shown:
             self._signal_bar(left, y - 3, entry["r"])
             d.text("%4d" % entry["r"], left + 24, y, scale=1)
             d.text(util.truncate(d, entry.get("n") or "?", WIDTH - left - 56),
@@ -535,7 +554,7 @@ class UI:
         elif view == VIEW_SECRET and scan is not None:
             entries, page, mode, age = scan
             if mode == "radar":
-                self.scan_radar(entries, status, age)
+                self.scan_radar(entries, page, status, age)
             else:
                 self.scan_list(entries, page, status, age)
         else:
