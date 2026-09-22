@@ -145,7 +145,6 @@ class UI:
         d.set_pen(BLACK)
         d.set_font("bitmap6")
         left = left if left is not None else (status.get("updated") or "no data")
-        d.text(util.truncate(d, left, w - 78), x, y, scale=1)
         flags = []
         if status.get("online") is False:
             flags.append("OFFLINE")
@@ -153,9 +152,15 @@ class UI:
             flags.append("MUTE")
         if status.get("sensor") is False:
             flags.append("NO BME")
+        if status.get("awake"):
+            flags.append("AWAKE")
         flags.append(VIEW_NAMES[status.get("view", 0)])
         text = " ".join(flags)
-        d.text(text, x + w - d.measure_text(text, 1), y, scale=1)
+        flags_w = d.measure_text(text, 1)
+        # Size the left text to what the flags actually leave, rather than
+        # a fixed allowance that more flags would overrun.
+        d.text(util.truncate(d, left, max(0, w - flags_w - 6)), x, y, scale=1)
+        d.text(text, x + w - flags_w, y, scale=1)
 
     def _header(self, title, right=""):
         d = self.d

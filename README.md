@@ -297,17 +297,38 @@ monoxide, natural gas, or smoke, and it must never be relied on for any
 of them. Fit a proper certified CO alarm and smoke alarm. Treat the badge
 as "something changed in here, go look."
 
-### The gas channel does not work on battery
+### The gas channel only works while the badge stays awake
 
 Measured on real hardware: from a cold start the BME688 reports an
 implausibly high resistance, collapses, then **climbs for minutes** —
-still rising 3–4% per 15 seconds after three full minutes. The heater
-has to run continuously before the number means anything.
+still rising 3–4% per 15 seconds after three full minutes.
 
-A badge that wakes, reads and powers down samples the same point of the
-same repeatable burn-in curve every time. Early builds of this project
-returned a byte-identical 5684.846 ohms on every cycle for hours, which
-looked like a working sensor and was nothing of the kind.
+The heater only fires *during a measurement*. So "keeping it warm" does
+not mean leaving it switched on; it means **sampling every few seconds,
+without a break**, which only a badge that stays awake can do. A sleeping
+badge's heater is always cold, on battery or USB alike.
+
+Early builds got this wrong twice:
+
+1. A badge that woke, read and slept sampled the same point of the same
+   repeatable burn-in curve every time, returning a byte-identical
+   5684.846 ohms for hours. It looked like a working sensor.
+2. The first warm-up gate timed conditioning from when the sensor object
+   was *created*. On USB the loop reused one object across a 30-minute
+   idle wait, so the gate reported half an hour of warm-up for a heater
+   that had been cold throughout — and trusted readings it should not
+   have. A baseline learned that way was about 3× too low.
+
+The gate now times an **unbroken run of samples**. `GAS_WARMUP_S`
+(default 300) of continuous sampling is needed before `gas` is trusted;
+a gap longer than `GAS_MAX_GAP_S` (default 60) lets the heater cool and
+restarts the clock. Until then the baseline does not learn, no gas alert
+can fire, and the detail view says why — `Air warming 12s` or `Air usb
+only` — rather than inventing a verdict. On hardware, a continuously
+sampled sensor was trusted after 309 seconds.
+
+Temperature, humidity and pressure are unaffected by any of this — they
+are valid immediately in every power mode.
 
 ### Reading the air figure
 
@@ -321,37 +342,74 @@ resistance-over-baseline, and BME688 resistance *rises* in clean air. As
 a raw percentage that produced readings like "115% clean", which reads
 like a fault rather than good news.
 
-Expect a positive drift during long continuous runs: the sensor's
-resistance climbs as it conditions, and the baseline is deliberately slow
-to follow, so you are partly watching burn-in rather than air quality.
-What matters is a sharp *fall*.
-
-So `GAS_WARMUP_S` (default 300) gates it: until the heater has run that
-long, `gas` is withheld, the baseline does not learn, no gas alert can
-fire, and the detail view says `Air warming 12s` instead of inventing a
-verdict. In practice **the gas channel only works on USB power**, where
-the badge stays awake.
-
-Temperature, humidity and pressure are unaffected — they are valid
-immediately and are the readings worth trusting.
+Expect a positive drift during long continuous runs: resistance climbs as
+the sensor conditions and the baseline is deliberately slow to follow. A
+sharp *fall* is the signal that matters.
 
 The heater also warms the package, so indoor temperature reads a degree
 or two high; mount the breakout away from the board if that bothers you.
 
 ## Power
 
-After each refresh the badge sets an RTC alarm and cuts its own power,
-which is why a battery lasts. `REFRESH_MINUTES` (default 30) is the main
-lever: the WiFi radio dominates consumption, so halving the refresh rate
-roughly halves the draw.
+`POWER_MODE` decides how the badge spends the time between refreshes:
 
-On USB power the badge cannot truly power down, so `sleep_for()` blocks
-until a button or the alarm fires and then returns — the main loop is
-written to handle both paths.
+| Mode | Between refreshes | Gas readings | Battery life (2000 mAh, est.) |
+|---|---|---|---|
+| `"auto"` (default) | awake on USB, deep sleep on battery | on USB only | months on battery |
+| `"sleep"` | always deep sleep | never | months |
+| `"awake"` | never sleeps; samples every `GAS_SAMPLE_S` | always | roughly 3 days |
 
-`SHOW_BATTERY` is off by default: battery sense is not wired the same way
-across Badger revisions, and a confidently wrong battery gauge is worse
-than none.
+Asleep, the badge sets an RTC alarm and cuts its own power — which also
+cuts the 3.3V rail to the BME688. `REFRESH_MINUTES` is then the main
+lever: the WiFi radio dominates consumption.
+
+Awake, it samples the sensor every `GAS_SAMPLE_S` (default 5) seconds to
+keep the heater conditioned, and only redraws the e-ink on a timer
+(`AWAKE_REDRAW_MINUTES`, default 5), a button press, a new alert, or a
+due refresh. Two things it guards against that a sleeping badge never
+meets: a lost WiFi network would otherwise become a retry loop, so
+attempts are spaced at least five minutes apart; and returning on the
+first button edge would split the A+C+UP chord, so presses are collected
+until every button is released.
+
+### Batteries
+
+**The Badger 2040 W has no charging circuit** — Pimoroni leave it out so
+the board is safe with alkaline cells too. Plugging in USB powers the
+board but does **not** charge an attached LiPo; charge it on an external
+charger.
+
+It also has **no low-voltage cutoff**, and will run down to about 2.7V —
+below the ~3.0V at which LiPo cells are damaged. `LOW_BATTERY_V`
+(default 3.2) powers the badge off below that on battery, leaving a
+`BATTERY LOW` message on the e-ink. It is measured at VSYS, a little
+below the cell itself. Set it to `None` only for alkaline cells.
+
+VSYS is readable on this board (ADC3, shared with the WiFi chip, so only
+while the radio is off): about 4.8V on USB, tracking the cell on battery.
+
+### Running a battery experiment
+
+1. Charge the LiPo to full **on an external charger**.
+2. In `config.py`: `POWER_MODE = "awake"`, `RUNTIME_LOG = True`.
+3. Deploy, then unplug USB. With a battery attached the board keeps
+   running; the log records the switch as VSYS dropping below 4.6V.
+4. Leave it. At `LOW_BATTERY_V` it powers itself off with a message.
+5. Plug back in and pull the log:
+
+   ```bash
+   mpremote fs cp :runtime.log .
+   python3 tools/battery_report.py runtime.log --capacity 2000
+   ```
+
+   The report separates the time on battery from any time on USB,
+   gives the start and end voltage, and the average current that
+   implies — the figure to compare with the estimate.
+
+`runtime.log` gets a line on every boot and then every
+`RUNTIME_LOG_MINUTES`, each carrying its own uptime and voltage, so the
+last line before the cutoff records how long it lasted even if the file
+has been trimmed. It is capped at ~96KB, about nine days of beats.
 
 ## Configuration
 

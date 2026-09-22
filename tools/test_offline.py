@@ -198,6 +198,16 @@ def install_fakes():
             return _Pin.usb_present if self.name == "WL_GPIO2" else 0
 
     machine.Pin = _Pin
+
+    class _ADC:
+        value = 29790            # ~4.50 V on VSYS
+        def __init__(self, channel):
+            pass
+
+        def read_u16(self):
+            return _ADC.value
+
+    machine.ADC = _ADC
     machine.I2C = lambda *a, **kw: FakeI2C()
     sys.modules["machine"] = machine
 
@@ -220,8 +230,13 @@ def install_fakes():
         def __init__(self, mode):
             pass
 
+        is_active = False
+
         def active(self, on=None):
-            return True
+            if on is not None:
+                WLAN.is_active = bool(on)
+                return None
+            return WLAN.is_active
 
         def config(self, **kw):
             pass
@@ -330,7 +345,14 @@ def install_fakes():
     cfg.NEWS_FEED = "top"
     cfg.NEWS_HEADLINES = 4
     cfg.GAS_WARMUP_S = 300
-    cfg.GAS_USB_ONLY = True
+    cfg.GAS_MAX_GAP_S = 60
+    # Existing tests exercise the sleep path; awake mode has its own tests.
+    cfg.POWER_MODE = "sleep"
+    cfg.GAS_SAMPLE_S = 5
+    cfg.AWAKE_REDRAW_MINUTES = 5
+    cfg.RUNTIME_LOG = False
+    cfg.RUNTIME_LOG_MINUTES = 10
+    cfg.LOW_BATTERY_V = 3.2
     cfg.GAS_ALERTS = True
     cfg.GAS_DROP_WARN, cfg.GAS_DROP_SEVERE = 0.60, 0.35
     cfg.GAS_BASELINE_SAMPLES = 20
@@ -1211,6 +1233,299 @@ def test_wifi_selection():
           [n["ssid"] for n in net.networks_from_config(malformed)] == ["Good"])
 
 
+class VirtualTime:
+    """Stands in for app.time so the awake loop runs instantly."""
+
+    def __init__(self):
+        self.now = 1000
+
+    def ticks_ms(self):
+        return self.now
+
+    def ticks_add(self, t, d):
+        return t + d
+
+    def ticks_diff(self, a, b):
+        return a - b
+
+    def sleep_ms(self, ms):
+        self.now += ms
+
+    def sleep(self, s):
+        self.now += int(s * 1000)
+
+
+def test_power_modes():
+    print("\npower modes and the awake loop")
+    from badgersett import app, runlog as runlog_mod
+    Pin = sys.modules["machine"].Pin
+
+    for mode, usb, expected in (("awake", 0, True), ("awake", 1, True),
+                                ("sleep", 0, False), ("sleep", 1, False),
+                                ("auto", 1, True), ("auto", 0, False)):
+        Pin.usb_present = usb
+        check("%s on %s -> %s" % (mode, "USB" if usb else "battery",
+                                  "awake" if expected else "sleep"),
+              app._stay_awake(mode) is expected)
+    Pin.usb_present = 1
+
+    CONFIG.POWER_MODE = "nonsense"
+    check("an unknown POWER_MODE falls back to auto", app._power_mode() == "auto")
+    CONFIG.POWER_MODE = "sleep"
+
+    # A display whose buttons follow a script, one frame per poll.
+    class ScriptedDisplay(FakeDisplay):
+        def __init__(self, frames):
+            FakeDisplay.__init__(self)
+            self.frames = list(frames)
+            self.polls = 0
+
+        def pressed(self, pin):
+            names = dict((p, n) for p, n in app._BUTTONS)
+            frame = self.frames[min(self.polls // len(app._BUTTONS),
+                                    len(self.frames) - 1)] if self.frames else ()
+            self.polls += 1
+            return names[pin] in frame
+
+    vt = VirtualTime()
+    real_time = app.time
+    app.time = vt
+    try:
+        # The chord: A and C held, then UP added, then everything released.
+        frames = [("A",), ("A", "C"), ("A", "C", "UP"), ("A", "C", "UP"), (), (), ()] + [()] * 20
+        got = app._collect_buttons(ScriptedDisplay(frames))
+        check("a held chord is collected whole", sorted(got) == ["A", "C", "UP"], got)
+        check("...and recognised as the secret chord", app._is_secret_chord(got))
+
+        got = app._collect_buttons(ScriptedDisplay([("B",), ()] + [()] * 20))
+        check("a single press stays a single press", got == ["B"], got)
+
+        class StubBME:
+            ok = True
+
+            def __init__(self, reading):
+                self.reading, self.reads = reading, 0
+
+            def read(self, **kw):
+                self.reads += 1
+                return dict(self.reading)
+
+        log = runlog_mod.RunLog(enabled=False)
+        st_path = "/tmp/badgersett_awake_state.json"
+        state_mod.PATH = st_path
+        if os.path.exists(st_path):
+            os.remove(st_path)
+        st = state_mod.State()
+        from badgersett import clock
+        st.set("weather", dict(SAMPLE_WEATHER))
+        st.set("last_refresh", clock.minutes())       # fresh: no refresh due
+        CONFIG.GAS_SAMPLE_S, CONFIG.AWAKE_REDRAW_MINUTES = 5, 5
+
+        calm = StubBME(dict(SAMPLE_INDOOR))
+        app._last_attempt = None
+        reason, pressed = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        check("with nothing happening it wakes for the redraw timer",
+              reason == "redraw", reason)
+        check("it sampled the sensor repeatedly to keep the heater warm",
+              calm.reads >= 50, calm.reads)      # 5 min / 5 s = 60
+
+        reason, pressed = app._awake_wait(
+            ScriptedDisplay([(), (), ("C",), ()] + [()] * 20), calm, st, log, 30)
+        check("a button press ends the wait early", reason == "button", reason)
+        check("the button is handed back to the main loop", pressed == ["C"], pressed)
+
+        # A tap so brief it is gone by the time collection starts.
+        reason, pressed = app._awake_wait(
+            ScriptedDisplay([(), ("B",)] + [()] * 30), calm, st, log, 30)
+        check("even a very brief tap is not lost", pressed == ["B"], (reason, pressed))
+
+        for _ in range(8):
+            st.update_gas_baseline(120000.0, 20)
+        st.set("alerts", {})
+        smoky = StubBME(dict(SAMPLE_INDOOR, gas=30000.0, gas_raw=30000.0))
+        reason, _ = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
+        check("a gas drop wakes it immediately", reason == "alert", reason)
+        check("...on the very first sample", smoky.reads == 1, smoky.reads)
+
+        # Once latched, the same alert must not keep firing, or the e-ink
+        # would be redrawn every five seconds for as long as it persists.
+        st.set("alerts", {"in:gas": 3})
+        reason, _ = app._awake_wait(ScriptedDisplay([()]), smoky, st, log, 30)
+        check("an already-latched alert does not re-trigger", reason == "redraw", reason)
+
+        st.set("alerts", {})
+        st.set("last_refresh", None)                  # due
+        app._last_attempt = None
+        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        check("a due refresh wakes it", reason == "refresh", reason)
+
+        # Just tried and failed: must NOT spin on the radio. The redraw timer
+        # is set shorter than RETRY_S so the two cannot expire together.
+        CONFIG.AWAKE_REDRAW_MINUTES = 2
+        app._last_attempt = vt.ticks_ms()
+        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        check("after a failed attempt it backs off instead of retrying at once",
+              reason == "redraw", reason)
+        CONFIG.AWAKE_REDRAW_MINUTES = 5
+        vt.now += app.RETRY_S * 1000
+        reason, _ = app._awake_wait(ScriptedDisplay([()]), calm, st, log, 30)
+        check("...and retries once RETRY_S has passed", reason == "refresh", reason)
+        os.remove(st_path) if os.path.exists(st_path) else None
+    finally:
+        app.time = real_time
+        app._last_attempt = None
+
+
+def test_battery_cutoff():
+    print("\nlow-battery cutoff")
+    from badgersett import app
+    Pin = sys.modules["machine"].Pin
+    ADC = sys.modules["machine"].ADC
+    WLAN = sys.modules["network"].WLAN
+    WLAN.is_active = False
+
+    def volts(v):
+        ADC.value = int(v / (3 * 3.3) * 65535)
+
+    Pin.usb_present = 0
+    volts(3.9)
+    check("a healthy battery is left alone", app._battery_low() is None)
+    volts(3.1)
+    low = app._battery_low()
+    check("below the cutoff it reports the voltage", low is not None and low < 3.2, low)
+    Pin.usb_present = 1
+    check("on USB the cutoff never fires, whatever VSYS says",
+          app._battery_low() is None)
+    Pin.usb_present = 0
+    CONFIG.LOW_BATTERY_V = None
+    check("LOW_BATTERY_V = None disables it", app._battery_low() is None)
+    CONFIG.LOW_BATTERY_V = 3.2
+
+    # And in the real loop: it must power off before doing anything else.
+    state_mod.PATH = "/tmp/badgersett_lowbat.json"
+    if os.path.exists(state_mod.PATH):
+        os.remove(state_mod.PATH)
+    volts(3.05)
+
+    class Off(BaseException):
+        pass
+
+    calls = []
+    badger = sys.modules["badger2040"]
+    original_off = getattr(badger, "turn_off", None)
+
+    def fake_off():
+        calls.append("off")
+        raise Off()
+
+    badger.turn_off = fake_off
+    displays = []
+    original_display = badger.Badger2040
+
+    def make_display():
+        d = FakeDisplay()
+        displays.append(d)
+        return d
+
+    badger.Badger2040 = make_display
+    try:
+        app.run()
+    except Off:
+        pass
+    finally:
+        badger.Badger2040 = original_display
+        if original_off:
+            badger.turn_off = original_off
+    check("the loop powers off at the cutoff", calls == ["off"], calls)
+    drawn = " ".join(str(c[1][0]) for c in displays[0].calls if c[0] == "text")
+    check("it leaves a BATTERY LOW message on the e-ink", "BATTERY LOW" in drawn, drawn[:60])
+    check("the message says this board cannot charge it",
+          "cannot charge" in drawn, drawn[-120:])
+    Pin.usb_present = 1
+    volts(4.5)
+    os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
+
+
+def test_gas_gap_reset():
+    print("\ngas conditioning must be continuous")
+    from badgersett import sensor as sensor_mod
+    bme = sensor_mod.Sensor(FakeI2C(), 0x77)
+    bme.heater_started = time.ticks_add(time.ticks_ms(), -600000)   # 10 min ago
+    bme._last_read = time.ticks_add(time.ticks_ms(), -2000)         # sampled 2s ago
+    r = bme.read(samples=2, settle=0, warmup=300, gas_enabled=True)
+    check("regular sampling keeps the conditioning time", r["gas_trusted"],
+          (r["gas_warm_s"], r["gas_reason"]))
+
+    # The bug this fixes: a long idle wait with the object kept alive.
+    bme._last_read = time.ticks_add(time.ticks_ms(), -30 * 60 * 1000)
+    r = bme.read(samples=2, settle=0, warmup=300, gas_enabled=True)
+    check("a 30-minute idle gap restarts conditioning", not r["gas_trusted"],
+          (r["gas_warm_s"], r["gas_reason"]))
+    check("...and says it is warming, not ok", r["gas_reason"].startswith("warming"),
+          r["gas_reason"])
+
+
+def test_pressure_spacing():
+    print("\npressure history spacing")
+    state_mod.PATH = "/tmp/badgersett_p_state.json"
+    if os.path.exists(state_mod.PATH):
+        os.remove(state_mod.PATH)
+    st = state_mod.State()
+    for minute in range(0, 60, 5):            # an awake badge, every 5 min
+        st.push_pressure(1012.0, minute)
+    check("samples closer than 15 minutes are not stored",
+          len(st.get("pressure")) == 4, st.get("pressure"))
+    st2 = state_mod.State()
+    st2.set("pressure", [])
+    for minute in range(0, 240, 5):
+        st2.push_pressure(1016.0 - minute / 60.0, minute)
+    check("four hours at 5-minute loops still yields a 3-hour trend",
+          st2.pressure_trend() is not None, st2.get("pressure"))
+    os.remove(state_mod.PATH) if os.path.exists(state_mod.PATH) else None
+
+
+def test_runlog():
+    print("\nruntime log")
+    from badgersett import power, runlog as runlog_mod
+    WLAN = sys.modules["network"].WLAN
+    path = "/tmp/badgersett_runtime.log"
+    runlog_mod.PATH = path
+    if os.path.exists(path):
+        os.remove(path)
+
+    WLAN.is_active = False
+    check("VSYS reads when the radio is off", power.vsys() is not None, power.vsys())
+    check("VSYS is converted to volts", 4.3 < power.vsys() < 4.7, power.vsys())
+    WLAN.is_active = True
+    check("VSYS refuses while the radio is on", power.vsys() is None)
+    WLAN.is_active = False
+
+    off = runlog_mod.RunLog(enabled=False)
+    off.write("boot")
+    check("a disabled log writes nothing", not os.path.exists(path))
+
+    log = runlog_mod.RunLog(enabled=True, every_minutes=10, mode="awake")
+    log.write("boot", usb=0)
+    log.maybe_beat(gas="ok")
+    log.maybe_beat(gas="ok")                   # too soon: suppressed
+    lines = open(path).read().splitlines()
+    check("boot and first beat were written", len(lines) == 2, lines)
+    check("lines carry uptime, voltage and mode",
+          all("up=" in l and "vsys=4." in l and "mode=awake" in l for l in lines),
+          lines)
+    check("extra fields are recorded", "gas=ok" in lines[1], lines[1])
+
+    runlog_mod.MAX_BYTES = 400
+    for i in range(40):
+        log.write("beat", n=i)
+    lines = open(path).read().splitlines()
+    check("the log is trimmed rather than growing without bound",
+          os.path.getsize(path) < 1200, os.path.getsize(path))
+    check("trimming keeps the newest lines", "n=39" in lines[-1], lines[-1])
+    runlog_mod.MAX_BYTES = 96000
+    os.remove(path)
+
+
 def test_clock():
     print("\nclock and refresh scheduling")
     from badgersett import clock
@@ -1445,6 +1760,11 @@ def main():
     test_gas_warmup_gate()
     test_power_detection()
     test_wifi_selection()
+    test_power_modes()
+    test_battery_cutoff()
+    test_gas_gap_reset()
+    test_pressure_spacing()
+    test_runlog()
     test_clock()
     test_buttons()
     test_layouts()

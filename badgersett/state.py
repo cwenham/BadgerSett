@@ -106,10 +106,19 @@ class State:
         return baseline
 
     # -- pressure history --------------------------------------------------
-    def push_pressure(self, hpa, stamp, keep=12):
+    def push_pressure(self, hpa, stamp, keep=12, min_interval=15):
+        """Record a pressure sample, at most one per `min_interval` minutes.
+
+        Spacing samples out keeps the history covering the same span no
+        matter how often the loop runs. Without it, a badge that stays
+        awake and loops every few minutes would fill all 12 slots within
+        the hour and never have the 3 hours of history the trend needs.
+        """
         if hpa is None or stamp is None:
             return          # no clock yet: a trend needs real timestamps
         history = list(self.get("pressure") or [])
+        if history and stamp - history[-1][0] < min_interval:
+            return
         history.append([stamp, round(hpa, 1)])
         if len(history) > keep:
             history = history[-keep:]

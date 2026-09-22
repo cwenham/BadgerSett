@@ -40,9 +40,12 @@ class Sensor:
         self.altitude = altitude
         self.device = None
         self.error = None
-        # The gas heater starts when the device is configured. Everything
-        # about the gas channel is measured from this moment.
+        # Conditioning is measured from the start of the current unbroken
+        # run of samples, not from when this object was created. The heater
+        # only fires during a measurement, so a long gap between reads lets
+        # it go cold even though the object - and the badge - stayed alive.
         self.heater_started = time.ticks_ms()
+        self._last_read = None
         if not AVAILABLE:
             self.error = "no breakout_bme68x in firmware"
             return
@@ -70,8 +73,25 @@ class Sensor:
         return self.device is not None
 
     def warm_seconds(self):
-        """How long the gas heater has been running this power-on."""
+        """How long the heater has been cycling without a break."""
         return time.ticks_diff(time.ticks_ms(), self.heater_started) / 1000.0
+
+    def _note_sample(self, max_gap):
+        """Restart the conditioning clock if the heater has been idle too long.
+
+        This is what makes the warm-up gate honest. An earlier version timed
+        warm-up from object creation, so on USB - where the loop reuses one
+        Sensor across a 30-minute wait with no reads - it reported half an
+        hour of warm-up for a heater that had been cold the whole time, and
+        trusted readings it should not have.
+        """
+        now = time.ticks_ms()
+        if self._last_read is not None and \
+                time.ticks_diff(now, self._last_read) > max_gap * 1000:
+            util.log("gas heater idle %.0fs; conditioning restarts" %
+                     (time.ticks_diff(now, self._last_read) / 1000.0))
+            self.heater_started = now
+        self._last_read = now
 
     def read(self, samples=4, settle=0.35, warmup=None, gas_enabled=True):
         """Return a reading dict, or None if the sensor is unavailable.
@@ -87,9 +107,10 @@ class Sensor:
         (baseline, alerts, the air-quality verdict) will use it.
         `gas_raw` is always present for display.
         """
+        import config
         if warmup is None:
-            import config
             warmup = getattr(config, "GAS_WARMUP_S", 300)
+        self._note_sample(getattr(config, "GAS_MAX_GAP_S", 30))
         if not self.ok:
             return None
 

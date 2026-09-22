@@ -82,8 +82,35 @@ ALTITUDE_M = 10                 # Hove seafront is near enough sea level
 # --------------------------------------------------------------------------
 # Refresh & power
 # --------------------------------------------------------------------------
-REFRESH_MINUTES = 30            # how long to sleep between network refreshes
+REFRESH_MINUTES = 30            # how often to fetch weather, warnings and news
 SENSOR_ONLY_ON_BUTTON = True    # a button wake re-reads the BME688 but skips WiFi
+
+# How the badge spends the time between refreshes:
+#   "auto"   stay awake on USB, deep-sleep on battery (default)
+#   "sleep"  always deep-sleep: longest battery life, but no gas readings
+#   "awake"  never sleep: keeps the BME688 gas heater conditioned so air
+#            quality works on battery too, at roughly 30-40x the current
+#
+# The gas channel only means something while the badge is awake, because
+# the heater only fires during a measurement - "keeping it warm" means
+# sampling it every few seconds, which a sleeping badge cannot do.
+POWER_MODE = "auto"
+
+# While awake:
+GAS_SAMPLE_S = 5                # sample the BME688 this often, keeping it conditioned
+AWAKE_REDRAW_MINUTES = 5        # redraw the e-ink on this timer (plus buttons/alerts)
+
+# Runtime log for power experiments: appends to runtime.log on boot and
+# then every RUNTIME_LOG_MINUTES, with uptime and supply voltage. Read the
+# last line after the battery dies to see how long it lasted.
+RUNTIME_LOG = False
+RUNTIME_LOG_MINUTES = 10
+
+# Power off when the supply falls below this on battery, to protect a LiPo.
+# The Badger 2040 W has no charger and no cutoff of its own, and will run
+# down to ~2.7V - below the ~3.0V at which LiPo cells are damaged. Measured
+# at VSYS, a little below the cell itself. None disables it.
+LOW_BATTERY_V = 3.2
 
 # --------------------------------------------------------------------------
 # Hardware on the Qw/ST chain
@@ -98,7 +125,6 @@ DRV2605_ADDRESS = 0x5A
 HAPTIC_ACTUATOR = "LRA"
 HAPTIC_ENABLED = True
 HAPTIC_QUIET_HOURS = (22, 7)    # (start_hour, end_hour) local; None to disable
-SHOW_BATTERY = False            # see README — not all Badger revisions wire VBAT
 
 # --------------------------------------------------------------------------
 # Severe weather
@@ -159,19 +185,14 @@ NEWS_HEADLINES = 4              # how many to show; 4 fits comfortably
 # The BME688's gas channel is a relative VOC sensor, NOT a calibrated gas
 # detector. BadgerSett learns a rolling baseline and warns when the reading
 # drops sharply below it. Read the safety note in the README.
-# The gas heater needs to run continuously before its reading means
-# anything: from cold it climbs for minutes. Below this many seconds of
-# heater time the reading is shown but treated as unusable - no baseline
-# learning, no alerts, no air-quality verdict. On a badge that sleeps
-# between refreshes this effectively means gas only works on USB power.
-# See "About the gas sensor" in the README before raising GAS_ALERTS.
+# The gas heater needs an unbroken run of samples before its reading means
+# anything: from cold it climbs for minutes. Until GAS_WARMUP_S seconds of
+# continuous sampling, the reading is shown but treated as unusable - no
+# baseline learning, no alerts, no air-quality verdict. A gap longer than
+# GAS_MAX_GAP_S between samples lets the heater cool, and starts the
+# warm-up again. See POWER_MODE, and the README, before relying on it.
 GAS_WARMUP_S = 300
-
-# Only run the gas channel on USB power. On battery the badge sleeps
-# between refreshes, so the heater can never stay warm long enough for
-# the reading to mean anything - and it would cost roughly seventy times
-# the badge's normal current to keep it awake. See the README.
-GAS_USB_ONLY = True
+GAS_MAX_GAP_S = 60              # tolerates the ~20s pause during a WiFi refresh
 
 GAS_ALERTS = True
 GAS_DROP_WARN = 0.60            # resistance below 60% of baseline -> warn
