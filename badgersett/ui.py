@@ -32,6 +32,16 @@ COL2_X = 152                    # left edge of the "inside" column on the detail
 DIVIDER_X = 145
 
 SCAN_ROWS = 8                   # rows per page on the scanner list
+
+# The radar's box: everything left of the divider, between the header bar
+# and the footer hints. Centre and radius are derived from it rather than
+# written down, so the plot cannot drift off-centre within its box.
+RADAR_BOX = (0, 17, 126, 108)   # x0, y0, x1, y1
+RADAR_CX = (RADAR_BOX[0] + RADAR_BOX[2]) // 2
+RADAR_CY = (RADAR_BOX[1] + RADAR_BOX[3]) // 2
+RADAR_R = min((RADAR_BOX[2] - RADAR_BOX[0]) // 2,
+              (RADAR_BOX[3] - RADAR_BOX[1]) // 2)
+SCAN_PANEL_X = 132              # the "strongest" list beside the radar
 VIEW_BADGE, VIEW_DETAIL, VIEW_NEWS, VIEW_SECRET = 0, 1, 2, 3
 VIEW_NAMES = ("BADGE", "DETAIL", "NEWS", "SECRET")
 
@@ -468,7 +478,7 @@ class UI:
         wifi = sum(1 for e in entries if e.get("k") == "W")
         self._header("RADAR", "%dW %dB" % (wifi, len(entries) - wifi))
 
-        cx, cy, radius = 74, 70, 48
+        cx, cy, radius = RADAR_CX, RADAR_CY, RADAR_R
         d.set_pen(BLACK)
         for ring in (0.25, 0.5, 0.75, 1.0):
             r = radius * ring
@@ -496,8 +506,8 @@ class UI:
                 d.pixel(x, y + 1)
 
         d.set_font("bitmap6")
-        left = 132
-        d.rectangle(left - 6, 18, 1, 90)
+        left = SCAN_PANEL_X
+        d.rectangle(RADAR_BOX[2], RADAR_BOX[1], 1, RADAR_BOX[3] - RADAR_BOX[1])
         d.text("STRONGEST", left, 20, scale=1)
         y = 32
         for entry in entries[:6]:

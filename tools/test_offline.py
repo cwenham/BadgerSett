@@ -1824,6 +1824,19 @@ def test_scanner_screens():
     ui.UI(display, CONFIG).scan_radar([], dict(status), None)
     check("an empty radar renders", display.calls and not display.out_of_bounds)
 
+    # The radar must sit centred in its box, left of the divider.
+    x0, y0, x1, y1 = ui.RADAR_BOX
+    left_gap = ui.RADAR_CX - ui.RADAR_R - x0
+    right_gap = x1 - (ui.RADAR_CX + ui.RADAR_R)
+    check("the radar is horizontally centred in its box",
+          abs(left_gap - right_gap) <= 1, (left_gap, right_gap))
+    check("it fits inside its box vertically",
+          ui.RADAR_CY - ui.RADAR_R >= y0 and ui.RADAR_CY + ui.RADAR_R <= y1,
+          (ui.RADAR_CY, ui.RADAR_R))
+    check("it does not reach across the divider",
+          ui.RADAR_CX + ui.RADAR_R <= ui.SCAN_PANEL_X - 6,
+          (ui.RADAR_CX + ui.RADAR_R, ui.SCAN_PANEL_X))
+
 
 def test_clock():
     print("\nclock and refresh scheduling")
