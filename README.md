@@ -89,12 +89,54 @@ and offers to auto-calibrate the actuator.
 | **C** | BBC news headlines |
 | **UP** | Force a network refresh now |
 | **DOWN** | Mute / unmute the haptics (survives sleep) |
-| **A + C, then UP** | Reserved. Detected, deliberately does nothing yet |
+| **A + C, then UP** | The radio scanner (see below) |
 
 The chord is checked before the individual buttons, since otherwise the
 A in it would simply switch to the badge view and the combination could
-never be told apart. To give it a purpose, fill in `_secret_action()` in
-`badgersett/app.py`.
+never be told apart.
+
+## The radio scanner
+
+Hold **A** and **C**, then press **UP**. The badge surveys both radios
+and lists what it can hear, strongest first.
+
+| Button | On this screen |
+|---|---|
+| **UP** / **DOWN** | Previous / next page (wraps around) |
+| **B** | Switch between the list and the radar |
+| **C** | Scan again |
+| **A** | Back to the badge |
+
+The buttons mean different things here than they do elsewhere, so DOWN
+pages rather than muting and UP pages rather than forcing a refresh.
+
+**The list** gives each device a signal bar, its strength in dBm, `W` or
+`B` for which radio heard it, a name, and a detail — the channel and
+security for WiFi, the maker and address type for Bluetooth. Eight per
+page.
+
+**The radar** plots signal strength as distance: the closer to the
+middle, the louder. Rings mark −40 through −100 dBm. **The bearing is
+not a real direction** — one antenna cannot tell where a signal came
+from. It is a hash of the device's address, so each device keeps the
+same spot between redraws instead of jumping about. Bearings come from
+the address rather than the name for a reason: a dozen devices all
+called "Apple" would otherwise stack up along one line.
+
+Both radios share the CYW43439, so the scans run one after the other:
+WiFi takes about half a second, and `SCAN_BLE_MS` (default 6000) is how
+long to listen for Bluetooth. A survey took 7.7s and heard 56 devices on
+the bench. Results are cached in `scan.json`, so paging and switching
+modes are instant; only the chord and **C** trigger a new scan.
+
+Two limits worth knowing:
+
+- **Bluetooth LE only.** MicroPython does not expose Classic Bluetooth,
+  so older headsets and car kits will not appear.
+- **You cannot count or identify people.** Modern phones rotate their
+  BLE address every ~15 minutes and mostly advertise no name — of 58
+  devices heard in one test, 21 used rotating addresses and only 13 gave
+  a name. The same phone will appear as a new device over time.
 
 A button wake re-reads the sensor but skips WiFi, so switching views is
 instant and cheap. Set `SENSOR_ONLY_ON_BUTTON = False` to refresh the
@@ -445,6 +487,7 @@ badgersett/
   weather.py    Open-Meteo client + WMO code table
   metoffice.py  UK Met Office regional warnings (RSS)
   news.py       BBC headlines, streamed and stopped early
+  scan.py       WiFi + BLE survey for the scanner screen
   nws.py        streaming parser for US government alerts
   alerts.py     rules, levels, de-duplication, quiet hours
   sensor.py     BME688 wrapper

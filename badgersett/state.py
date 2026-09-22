@@ -18,6 +18,8 @@ DEFAULTS = {
     "pressure": [],        # [(minutes_since_epochish, hPa), ...] most recent last
     "muted": False,
     "view": 0,
+    "scan_page": 0,        # which page of the scanner list is showing
+    "scan_mode": "list",   # "list" or "radar"
     "weather": None,       # last good forecast, so a button wake can still draw
     "indoor": None,        # last good sensor reading
     "news": [],            # last good headlines, so button C works offline

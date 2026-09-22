@@ -290,6 +290,53 @@ def install_fakes():
     bme_mod.STATUS_HEATER_STABLE = 0x10
     sys.modules["breakout_bme68x"] = bme_mod
 
+    bt = types.ModuleType("bluetooth")
+
+    def adv(name=None, company=None):
+        out = b""
+        if name:
+            out += bytes([1 + len(name), 0x09]) + name.encode()
+        if company is not None:
+            payload = bytes([company & 0xFF, company >> 8]) + b"\x01\x02"
+            out += bytes([1 + len(payload), 0xFF]) + payload
+        return out
+
+    class FakeBLE:
+        # (addr_type, addr, adv_type, rssi, adv)
+        devices = [
+            (0, b"\x11\x22\x33\x44\x55\x66", 0, -43, adv("PowerStation-42")),
+            (1, b"\x7f\xff\xff\xaa\xbb\xcc", 0, -53, adv(None, 0x004C)),
+            (1, b"\x7f\xff\xff\xaa\xbb\xcc", 0, -49, adv(None, 0x004C)),  # again, louder
+            (1, b"\x40\x00\x00\x01\x02\x03", 0, -71, adv(None, 0x00E0)),
+            (0, b"\x00\x11\x22\x33\x44\x55", 0, -88, adv("TY", 0x07D0)),
+            # Advertises neither a name nor a maker: only an address to go on.
+            (1, b"\xc0\xde\xca\xfe\xba\xbe", 0, -95, b""),
+        ]
+        fail = False
+
+        def __init__(self):
+            self._irq = None
+            self._active = False
+
+        def active(self, on=None):
+            if on is not None:
+                self._active = bool(on)
+                return None
+            return self._active
+
+        def irq(self, handler):
+            self._irq = handler
+
+        def gap_scan(self, duration_ms, interval_us, window_us, active):
+            if FakeBLE.fail:
+                raise OSError("radio busy")
+            for device in FakeBLE.devices:
+                self._irq(5, device)
+            self._irq(6, None)
+
+    bt.BLE = FakeBLE
+    sys.modules["bluetooth"] = bt
+
     ntp = types.ModuleType("ntptime")
     ntp.host = "pool.ntp.org"
     ntp.calls = []
@@ -1660,6 +1707,124 @@ def test_runlog():
     os.remove(path)
 
 
+def test_scanner():
+    print("\nradio scanner (the secret screen)")
+    from badgersett import scan as scan_mod
+    WLAN = sys.modules["network"].WLAN
+    FakeBLE = sys.modules["bluetooth"].BLE
+    scan_mod.PATH = "/tmp/badgersett_scan.json"
+    if os.path.exists(scan_mod.PATH):
+        os.remove(scan_mod.PATH)
+    WLAN.is_active = False
+    FakeBLE.fail = False
+
+    check("advertising payload split into fields",
+          scan_mod._adv_fields(b"\x05\x09abcd")[0x09] == b"abcd")
+    check("a truncated payload does not raise",
+          scan_mod._adv_fields(b"\x05") == {})
+    check("public addresses are named as such",
+          scan_mod._addr_kind(0, b"\x11" * 6) == "public")
+    check("a phone's rotating address is identified",
+          scan_mod._addr_kind(1, b"\x40\x00\x00\x00\x00\x00") == "rotating")
+    check("a static random address is distinguished",
+          scan_mod._addr_kind(1, b"\xc0\x00\x00\x00\x00\x00") == "static")
+
+    wifi = scan_mod.wifi_scan()
+    names = sorted(e["n"] for e in wifi)
+    check("wifi scan finds the access points",
+          names == ["(hidden)", "HomeNet", "Neighbour", "OfficeNet"], names)
+    check("duplicate APs collapse to the strongest",
+          [e["r"] for e in wifi if e["n"] == "HomeNet"] == [-66],
+          [e for e in wifi if e["n"] == "HomeNet"])
+    check("a hidden SSID is labelled, not dropped",
+          not any(e["n"] == "" for e in wifi))
+    check("wifi entries carry channel and security",
+          all("ch" in e["x"] for e in wifi), wifi[:1])
+    check("the radio is left off afterwards", WLAN.is_active is False)
+
+    ble = scan_mod.ble_scan(50)
+    check("bluetooth scan finds each distinct address", len(ble) == 5, ble)
+    labels = [e["n"] for e in ble]
+    check("a named device uses its name", "PowerStation-42" in labels, labels)
+    check("an unnamed device falls back to its maker", "Apple" in labels, labels)
+    check("otherwise it falls back to part of the address",
+          any(":" in l for l in labels), labels)
+    apple = [e for e in ble if e["n"] == "Apple"][0]
+    check("repeat sightings keep the strongest signal", apple["r"] == -49, apple)
+    check("a rotating address is flagged as such", "rotating" in apple["x"], apple)
+
+    FakeBLE.fail = True
+    check("a failing bluetooth radio yields nothing, and does not raise",
+          scan_mod.ble_scan(50) == [])
+    FakeBLE.fail = False
+
+    entries = scan_mod.survey(50, True)
+    check("survey merges both radios", len(entries) == 9, len(entries))
+    check("sorted strongest first",
+          entries == sorted(entries, key=lambda e: -e["r"]), [e["r"] for e in entries])
+    check("both kinds present", {e["k"] for e in entries} == {"W", "B"})
+    check("bluetooth can be skipped",
+          all(e["k"] == "W" for e in scan_mod.survey(50, False)))
+
+    scan_mod.save(entries, 1234)
+    back, stamp = scan_mod.load()
+    check("a scan round-trips through its own file",
+          len(back) == len(entries) and stamp == 1234, (len(back), stamp))
+    scan_mod.PATH = "/tmp/badgersett_missing.json"
+    check("a missing cache is not an error", scan_mod.load() == ([], None))
+    scan_mod.PATH = "/tmp/badgersett_scan.json"
+
+    long_list = [{"k": "B", "n": "dev%d" % i, "r": -40 - i, "x": "static"}
+                 for i in range(200)]
+    scan_mod.save(long_list, 1)
+    check("the cache is bounded", len(scan_mod.survey(50, False)) <= scan_mod.MAX_ENTRIES)
+    os.remove(scan_mod.PATH) if os.path.exists(scan_mod.PATH) else None
+
+
+def test_scanner_screens():
+    print("\nscanner screens")
+    from badgersett import scan as scan_mod
+    status = {"updated": "Updated 17:15", "online": True, "muted": False,
+              "sensor": True, "view": 3, "credit": "x"}
+    entries = [{"k": "W", "n": "Acme-Guest", "r": -69, "x": "ch6 WPA2"},
+               {"k": "B", "n": "PowerStation-42", "r": -43, "x": "public"},
+               {"k": "B", "n": "Apple", "r": -53, "x": "rotating"}]
+    entries += [{"k": "B", "n": "dev-%d" % i, "r": -60 - i, "x": "static"}
+                for i in range(20)]
+    entries.sort(key=lambda e: -e["r"])
+
+    for mode in ("list", "radar"):
+        display = FakeDisplay()
+        ui.UI(display, CONFIG).render(3, None, None, [], None,
+                                      dict(status), None, (entries, 0, mode, 24))
+        drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+        check("%s renders" % mode, display.updates == 1 and len(display.calls) > 10)
+        check("%s stays on the panel" % mode, not display.out_of_bounds,
+              display.out_of_bounds[:2])
+        check("%s shows the loudest device" % mode, "PowerStation-42" in drawn, drawn[:70])
+        check("%s names its controls" % mode, "A exit" in drawn, drawn[-60:])
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).scan_list(entries, 1, dict(status), 24)
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("page 2 shows different devices", "PowerStation-42" not in drawn, drawn[:70])
+    check("page 2 says which page it is", "2/3" in drawn, drawn[:40])
+
+    display = FakeDisplay()
+    page = ui.UI(display, CONFIG).scan_list(entries, 99, dict(status), 24)
+    check("a page past the end is clamped", page == 2, page)
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).scan_list([], 0, dict(status), None)
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("an empty scan explains itself", "scan again" in drawn, drawn)
+    check("an empty scan stays on the panel", not display.out_of_bounds)
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).scan_radar([], dict(status), None)
+    check("an empty radar renders", display.calls and not display.out_of_bounds)
+
+
 def test_clock():
     print("\nclock and refresh scheduling")
     from badgersett import clock
@@ -1725,17 +1890,110 @@ def test_buttons():
     check("C+UP alone is not the chord", not app._is_secret_chord(["C", "UP"]))
     check("a bare A is not the chord", not app._is_secret_chord(["A"]))
     check("nothing pressed is not the chord", not app._is_secret_chord([]))
-    check("the reserved action is a no-op returning None",
-          app._secret_action(None, None) is None)
     check("chord constant is A, C and UP",
           sorted(app.SECRET_CHORD) == ["A", "C", "UP"], app.SECRET_CHORD)
     check("views are badge/detail/news/secret",
           (ui.VIEW_BADGE, ui.VIEW_DETAIL, ui.VIEW_NEWS, ui.VIEW_SECRET) == (0, 1, 2, 3))
 
 
+def test_secret_screen_flow():
+    print("\nsecret screen: chord, paging and exit")
+    from badgersett import app, scan as scan_mod
+    scan_mod.PATH = "/tmp/badgersett_scan_flow.json"
+    state_mod.PATH = "/tmp/badgersett_secret.json"
+    for path in (scan_mod.PATH, state_mod.PATH):
+        if os.path.exists(path):
+            os.remove(path)
+    CONFIG.SCAN_BLE, CONFIG.SCAN_BLE_MS = True, 50
+    sys.modules["network"].WLAN.is_active = False
+
+    badger = sys.modules["badger2040"]
+    original_display, original_buttons = badger.Badger2040, app._wake_buttons
+    displays = []
+
+    def make_display():
+        d = FakeDisplay()
+        displays.append(d)
+        return d
+
+    badger.Badger2040 = make_display
+
+    class Stop(BaseException):
+        pass
+
+    badger.sleep_for = lambda m: (_ for _ in ()).throw(Stop())
+
+    def press(buttons):
+        """One wake with these buttons held; returns what was drawn."""
+        app._wake_buttons = lambda display: list(buttons)
+        del displays[:]
+        try:
+            app.run()
+        except Stop:
+            pass
+        return " ".join(str(c[1][0]) for c in displays[0].calls if c[0] == "text")
+
+    try:
+        drawn = press(["A", "C", "UP"])
+        saved = state_mod.State()
+        check("the chord opens the scanner", saved.get("view") == ui.VIEW_SECRET,
+              saved.get("view"))
+        check("it scans on the way in", os.path.exists(scan_mod.PATH))
+        check("and draws the scanner, not the badge",
+              "SCAN" in drawn and CONFIG.NAME not in drawn, drawn[:60])
+        check("the chord does not also fire UP's network refresh or A's badge view",
+              saved.get("view") == ui.VIEW_SECRET)
+
+        entries, _ = scan_mod.load()
+        pages = max(1, (len(entries) + ui.SCAN_ROWS - 1) // ui.SCAN_ROWS)
+        check("enough devices for more than one page", pages > 1, pages)
+
+        press(["DOWN"])
+        check("DOWN pages forward instead of muting",
+              state_mod.State().get("scan_page") == 1 and not state_mod.State().get("muted"),
+              (state_mod.State().get("scan_page"), state_mod.State().get("muted")))
+        press(["UP"])
+        check("UP pages back instead of forcing a refresh",
+              state_mod.State().get("scan_page") == 0)
+        press(["UP"])
+        check("paging back past the first page wraps to the last",
+              state_mod.State().get("scan_page") == pages - 1,
+              state_mod.State().get("scan_page"))
+
+        drawn = press(["B"])
+        check("B switches to the radar",
+              state_mod.State().get("scan_mode") == "radar" and "RADAR" in drawn,
+              (state_mod.State().get("scan_mode"), drawn[:40]))
+        drawn = press(["B"])
+        check("B switches back to the list",
+              state_mod.State().get("scan_mode") == "list" and "SCAN" in drawn)
+
+        os.remove(scan_mod.PATH)
+        press(["C"])
+        check("C scans again", os.path.exists(scan_mod.PATH))
+
+        drawn = press(["A"])
+        check("A leaves the scanner for the badge",
+              state_mod.State().get("view") == ui.VIEW_BADGE, drawn[:40])
+        check("...and the badge is what gets drawn", CONFIG.NAME in drawn, drawn[:60])
+
+        drawn = press(["B"])
+        check("off the scanner, B is the detail view again",
+              state_mod.State().get("view") == ui.VIEW_DETAIL)
+    finally:
+        badger.Badger2040 = original_display
+        app._wake_buttons = original_buttons
+        # The retry backoff is module state: leave it clean for the next test.
+        app._last_attempt = None
+        for path in (scan_mod.PATH, state_mod.PATH):
+            if os.path.exists(path):
+                os.remove(path)
+
+
 def test_app_cycle():
     print("\nfull wake cycle (app.py)")
     from badgersett import app, nws as nws_mod, weather as weather_mod
+    app._last_attempt = None          # no backoff carried in from another test
 
     state_mod.PATH = "/tmp/badgersett_app_state.json"
     if os.path.exists(state_mod.PATH):
@@ -1894,6 +2152,8 @@ def main():
     test_gas_warmup_gate()
     test_power_detection()
     test_wifi_selection()
+    test_scanner()
+    test_scanner_screens()
     test_power_modes()
     test_redraw_flipflop()
     test_battery_cutoff()
@@ -1903,6 +2163,7 @@ def main():
     test_clock()
     test_buttons()
     test_layouts()
+    test_secret_screen_flow()
     test_app_cycle()
     print("\n%s" % ("-" * 46))
     if FAILURES:

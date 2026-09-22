@@ -23,7 +23,8 @@ import machine
 import config
 
 from . import alerts as alert_rules
-from . import clock, metoffice, net, news, nws, power, runlog, sensor, ui, util, weather as weather_api
+from . import (clock, metoffice, net, news, nws, power, runlog, scan,  # noqa: E501
+               sensor, ui, util, weather as weather_api)
 from .haptics import Haptics
 from .sensor import Sensor
 from .state import State
@@ -46,14 +47,14 @@ def _is_secret_chord(buttons):
     return all(name in buttons for name in SECRET_CHORD)
 
 
-def _secret_action(state, haptic):
-    """Reserved. Deliberately does nothing yet.
-
-    Put the fourth screen here when you decide what it should show: set
-    a view, or act and leave the current view alone as it does now.
-    """
-    util.log("secret chord (A+C+UP) detected - reserved, no action")
-    return None
+def _scan_age(stamp):
+    """Seconds since a scan, or None when the clock has never been set."""
+    if stamp is None or not clock.is_set():
+        return None
+    try:
+        return max(0, int(time.time()) - int(stamp))
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +382,28 @@ def run():
         view = state.get("view", ui.VIEW_BADGE)
         force_refresh = False
 
+        rescan = False
+        page_delta = 0
         if _is_secret_chord(buttons):
             # Handled first: otherwise the A in the chord would just switch
             # to the badge view and the chord could never be distinguished.
-            _secret_action(state, haptic)
+            util.log("secret chord (A+C+UP): opening the scanner")
+            view = ui.VIEW_SECRET
+            state.set("scan_page", 0)
+            rescan = True
+        elif view == ui.VIEW_SECRET and buttons:
+            # On the scanner the buttons mean something else entirely.
+            if "A" in buttons:
+                view = ui.VIEW_BADGE
+            elif "B" in buttons:
+                state.set("scan_mode",
+                          "list" if state.get("scan_mode") == "radar" else "radar")
+            elif "C" in buttons:
+                rescan = True
+            elif "UP" in buttons:
+                page_delta = -1
+            elif "DOWN" in buttons:
+                page_delta = 1
         else:
             if "A" in buttons:
                 view = ui.VIEW_BADGE
@@ -465,6 +484,23 @@ def run():
         current = alert_rules.evaluate(config, forecast, indoor, state, official)
         alert_rules.notify(config, current, state, haptic, clock.hour())
 
+        # -- radio survey, only while the scanner is on screen -----------
+        scan_data = None
+        if view == ui.VIEW_SECRET:
+            entries, stamp = scan.load()
+            if rescan or not entries:
+                display.led(64)
+                entries = scan.survey(getattr(config, "SCAN_BLE_MS", 6000),
+                                      getattr(config, "SCAN_BLE", True))
+                display.led(0)
+                stamp = int(time.time()) if clock.is_set() else None
+                scan.save(entries, stamp)
+            pages = max(1, (len(entries) + ui.SCAN_ROWS - 1) // ui.SCAN_ROWS)
+            page = ((state.get("scan_page") or 0) + page_delta) % pages
+            state.set("scan_page", page)
+            scan_data = (entries, page, state.get("scan_mode") or "list",
+                         _scan_age(stamp))
+
         # -- draw --------------------------------------------------------
         updated = state.get("updated")
         if updated and "T" in updated:           # older state files
@@ -487,7 +523,8 @@ def run():
             "awake": awake,
             "view": view,
         }
-        screen.render(view, forecast, indoor, current, state, status, headlines)
+        screen.render(view, forecast, indoor, current, state, status, headlines,
+                      scan_data)
 
         state.save()
         if haptic and haptic.ready:

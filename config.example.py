@@ -166,6 +166,20 @@ HEAT_WARN = 28                  # degrees, in your chosen unit
 COLD_WARN = -2
 
 # --------------------------------------------------------------------------
+# Secret screen: the radio scanner (hold A and C, then press UP)
+# --------------------------------------------------------------------------
+# Lists WiFi access points and Bluetooth LE devices in range, strongest
+# first. On that screen: UP/DOWN page through the list, B switches to the
+# radar, C scans again, A leaves.
+#
+# Both radios share one chip, so the scans run one after the other. WiFi
+# takes about half a second; SCAN_BLE_MS is how long to listen for
+# Bluetooth. Longer hears more - a phone advertises every second or two -
+# but the radio is on the whole time, so keep it modest on battery.
+SCAN_BLE = True
+SCAN_BLE_MS = 6000
+
+# --------------------------------------------------------------------------
 # News (button C)
 # --------------------------------------------------------------------------
 # Headlines come from the BBC's own published RSS feeds, not scraped pages.

@@ -12,6 +12,7 @@ y is a baseline, not a top edge.
 """
 
 import gc
+import math
 
 import badger2040
 
@@ -30,6 +31,7 @@ PANE_W = WIDTH - PANE_X
 COL2_X = 152                    # left edge of the "inside" column on the detail view
 DIVIDER_X = 145
 
+SCAN_ROWS = 8                   # rows per page on the scanner list
 VIEW_BADGE, VIEW_DETAIL, VIEW_NEWS, VIEW_SECRET = 0, 1, 2, 3
 VIEW_NAMES = ("BADGE", "DETAIL", "NEWS", "SECRET")
 
@@ -404,15 +406,131 @@ class UI:
 
         self._status(6, 117, WIDTH - 12, status, left="BBC News")
 
+    # -- view 3 (A+C, then UP): the radio scanner -------------------------
+    def _signal_bar(self, x, y, rssi, blocks=5, w=3, gap=1):
+        """Five rising blocks; filled ones show strength."""
+        d = self.d
+        level = 5 if rssi >= -50 else 4 if rssi >= -60 else \
+            3 if rssi >= -70 else 2 if rssi >= -80 else 1
+        for i in range(blocks):
+            height = 2 + i * 2
+            bx = x + i * (w + gap)
+            by = y + (10 - height)
+            if i < level:
+                d.rectangle(bx, by, w, height)
+            else:
+                d.rectangle(bx, by + height - 1, w, 1)
+
+    def scan_list(self, entries, page, status, age):
+        d = self.d
+        self._clear()
+        pages = max(1, (len(entries) + SCAN_ROWS - 1) // SCAN_ROWS)
+        page = max(0, min(page, pages - 1))
+        wifi = sum(1 for e in entries if e.get("k") == "W")
+        self._header("SCAN", "%dW %dB  %d/%d" % (wifi, len(entries) - wifi,
+                                                 page + 1, pages))
+
+        if not entries:
+            d.set_font("bitmap6")
+            d.text("Nothing heard. Press C to scan again.", 6, 46, scale=1)
+        else:
+            d.set_font("bitmap6")
+            y = 18
+            for entry in entries[page * SCAN_ROWS:(page + 1) * SCAN_ROWS]:
+                self._signal_bar(6, y, entry["r"])
+                d.text("%4d" % entry["r"], 30, y + 3, scale=1)
+                d.text(entry.get("k", "?"), 56, y + 3, scale=1)
+                extra = entry.get("x") or ""
+                extra_w = d.measure_text(extra, 1)
+                name_w = WIDTH - 66 - extra_w - 8
+                d.text(util.truncate(d, entry.get("n") or "?", name_w), 66, y + 3, scale=1)
+                if extra:
+                    d.text(extra, WIDTH - extra_w - 4, y + 3, scale=1)
+                y += 11
+
+        d.set_font("bitmap6")
+        hint = "UP/DN page  B radar  C rescan  A exit"
+        d.text(hint, 6, 112, scale=1)
+        if age is not None:
+            stamp = "%ds ago" % age if age < 600 else "%dm ago" % (age // 60)
+            d.text(stamp, WIDTH - d.measure_text(stamp, 1) - 4, 112, scale=1)
+        return page
+
+    def scan_radar(self, entries, status, age):
+        """Signal strength as distance: the closer to the middle, the louder.
+
+        Bearing is a stable hash of the name, not a real direction - a
+        single antenna cannot tell where a signal came from. It only keeps
+        each device in the same place between redraws.
+        """
+        d = self.d
+        self._clear()
+        wifi = sum(1 for e in entries if e.get("k") == "W")
+        self._header("RADAR", "%dW %dB" % (wifi, len(entries) - wifi))
+
+        cx, cy, radius = 74, 70, 48
+        d.set_pen(BLACK)
+        for ring in (0.25, 0.5, 0.75, 1.0):
+            r = radius * ring
+            steps = max(12, int(r))
+            for i in range(steps):
+                angle = 2 * math.pi * i / steps
+                d.pixel(int(cx + r * math.cos(angle)), int(cy + r * math.sin(angle)))
+        d.rectangle(cx - 3, cy, 7, 1)          # the badge itself
+        d.rectangle(cx, cy - 3, 1, 7)
+
+        for entry in entries:
+            rssi = max(-100, min(-30, entry["r"]))
+            r = (abs(rssi) - 30) / 70.0 * radius
+            seed = 0
+            for ch in str(entry.get("i") or entry.get("n") or "?"):
+                seed = (seed * 31 + ord(ch)) & 0xFFFF
+            angle = 2 * math.pi * (seed % 360) / 360.0
+            x = int(cx + r * math.cos(angle))
+            y = int(cy + r * math.sin(angle))
+            if entry.get("k") == "W":
+                d.rectangle(x - 1, y - 1, 3, 3)
+            else:
+                d.pixel(x, y)
+                d.pixel(x + 1, y)
+                d.pixel(x, y + 1)
+
+        d.set_font("bitmap6")
+        left = 132
+        d.rectangle(left - 6, 18, 1, 90)
+        d.text("STRONGEST", left, 20, scale=1)
+        y = 32
+        for entry in entries[:6]:
+            self._signal_bar(left, y - 3, entry["r"])
+            d.text("%4d" % entry["r"], left + 24, y, scale=1)
+            d.text(util.truncate(d, entry.get("n") or "?", WIDTH - left - 56),
+                   left + 48, y, scale=1)
+            y += 11
+        d.text("[] wifi  . ble", left, 96, scale=1)
+        d.text("rings -40 to -100 dBm", left, 105, scale=1)
+
+        hint = "B list  C rescan  A exit"
+        d.text(hint, 6, 112, scale=1)
+        if age is not None:
+            stamp = "%ds ago" % age if age < 600 else "%dm ago" % (age // 60)
+            d.text(stamp, WIDTH - d.measure_text(stamp, 1) - 4, 112, scale=1)
+
     # -- dispatch ---------------------------------------------------------
-    def render(self, view, weather, indoor, alerts, state, status, headlines=None):
+    def render(self, view, weather, indoor, alerts, state, status,
+               headlines=None, scan=None):
         if view == VIEW_DETAIL:
             self.detail_view(weather, indoor, state, alerts, status)
         elif view == VIEW_NEWS:
             self.news_view(headlines or [], status)
+        elif view == VIEW_SECRET and scan is not None:
+            entries, page, mode, age = scan
+            if mode == "radar":
+                self.scan_radar(entries, status, age)
+            else:
+                self.scan_list(entries, page, status, age)
         else:
-            # VIEW_SECRET is reserved and deliberately falls back to the
-            # badge, so an unknown view can never leave a blank screen.
+            # An unknown view - or the scanner with nothing to show yet -
+            # falls back to the badge rather than a blank screen.
             self.badge(weather, indoor, alerts, status)
         self.d.update()
 
