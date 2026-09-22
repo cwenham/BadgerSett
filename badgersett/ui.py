@@ -105,9 +105,12 @@ def _banner(d, x, y, w, h, text, scale=1):
 
 
 class UI:
-    def __init__(self, display, config):
+    def __init__(self, display, config, framebuffer=None):
         self.d = display
         self.config = config
+        # The panel's own buffer, when the app has handed us one. It lets the
+        # photo be blitted in directly instead of decoded.
+        self.framebuffer = framebuffer
 
     # -- shared pieces -----------------------------------------------------
     def _clear(self):
@@ -116,30 +119,34 @@ class UI:
         self.d.set_pen(BLACK)
 
     def _photo(self, x=0, y=0, w=PHOTO_W, h=HEIGHT):
-        """Draw the photo, holding the PNG decoder for as short a time as
-        possible.
+        """Blit the photo straight into the framebuffer.
 
-        pngdec.PNG() allocates roughly 48KB up front. Held for the life of
-        the UI object that is most of the badge's usable heap, and it
-        leaves too little contiguous memory for a TLS handshake later in
-        the cycle - which shows up as ENOMEM on the HTTPS feeds rather
-        than as anything to do with the photo. So it is built on demand
-        and released immediately.
+        This used to decode a PNG, which cost a 48KB contiguous allocation.
+        After a refresh - two TLS sessions and a JSON parse - the heap is
+        fragmented enough that the allocation fails, and the failure took
+        the display down with it: no photo, then a hard lockup that even
+        Ctrl-C could not reach.
+
+        The badge's framebuffer stores 8 vertical pixels per byte, column
+        by column, so a full-height image at x=0 is exactly the first
+        width * 16 bytes. tools/make_photo.py packs the photo that way, and
+        drawing it is one slice assignment of 1536 bytes that cannot fail
+        for want of memory.
         """
         path = getattr(self.config, "PHOTO", None)
-        if path:
-            png = None
+        if path and self.framebuffer is not None:
             try:
-                import pngdec
-                png = pngdec.PNG(self.d.display)
-                png.open_file(path)
-                png.decode(x, y)
-                return True
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                wanted = w * (HEIGHT // 8)
+                if x == 0 and len(data) == wanted:
+                    self.framebuffer[0:wanted] = data
+                    return True
+                util.log("photo %s is %d bytes, expected %d" % (path, len(data), wanted))
+            except OSError as exc:
+                util.log("photo unreadable:", exc)
             except Exception as exc:
                 util.log("photo failed:", exc)
-            finally:
-                png = None
-                gc.collect()
         self._initials(x, y, w, h)
         return False
 

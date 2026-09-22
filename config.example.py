@@ -13,9 +13,10 @@ NAME = "Your Name"
 TITLE = "Job Title"
 ORG = "Company / Team"          # shown small under the title; "" to hide
 
-# 1-bit PNG, 96x128. Build it with: python3 tools/make_photo.py me.jpg
+# Packed 1-bit image, 96x128, built by tools/make_photo.py (it writes
+# both a .png for previewing and the .fb the badge actually loads).
 # Set to None to draw initials instead.
-PHOTO = "photo.png"
+PHOTO = "photo.fb"
 
 # --------------------------------------------------------------------------
 # WiFi

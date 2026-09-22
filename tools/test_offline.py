@@ -75,6 +75,9 @@ class FakeDisplay:
     def set_update_speed(self, speed):
         pass
 
+    def set_framebuffer(self, buf):
+        self.framebuffer = buf
+
     def led(self, level):
         pass
 
@@ -334,7 +337,18 @@ def install_fakes():
                 self._irq(5, device)
             self._irq(6, None)
 
-    bt.BLE = FakeBLE
+    # Real MicroPython returns one shared BLE object; model that, or the
+    # "is the radio up?" guard cannot be tested.
+    _ble_singleton = []
+
+    def _get_ble():
+        if not _ble_singleton:
+            _ble_singleton.append(FakeBLE.__new__(FakeBLE))
+            FakeBLE.__init__(_ble_singleton[0])
+        return _ble_singleton[0]
+
+    bt.BLE = _get_ble
+    bt.FakeBLE = FakeBLE
     sys.modules["bluetooth"] = bt
 
     ntp = types.ModuleType("ntptime")
@@ -359,7 +373,7 @@ def install_fakes():
     cfg.NAME = "Christopher Wenham"
     cfg.TITLE = "Principal Engineer"
     cfg.ORG = "Badger Industries"
-    cfg.PHOTO = None
+    cfg.PHOTO = None          # most layout tests use the initials fallback
     cfg.WIFI_NETWORKS = [
         {"label": "Home", "ssid": "HomeNet", "password": "hpw",
          "lat": 50.8279, "lon": -0.1687, "met_region": "se", "altitude": 10},
@@ -1182,36 +1196,40 @@ def test_power_detection():
     WLAN = sys.modules["network"].WLAN
     WLAN.is_active = False
 
+    # The VBUS pin is the primary signal: one pin read, nothing disturbed.
+    machine_mod.Pin.usb_present = 1
     set_supply(4.8)
-    check("4.8V on VSYS reads as USB", power.on_usb() is True)
-    set_supply(3.9)
-    check("a LiPo's 3.9V reads as battery", power.on_usb() is False)
-    set_supply(4.2)
-    check("a full LiPo at 4.2V is still battery", power.on_usb() is False)
-
-    # With the radio up VSYS cannot be read, so WL_GPIO2 is the fallback.
-    WLAN.is_active = True
-    machine_mod.Pin.usb_present = 1
-    check("radio up: falls back to VBUS sense (USB)", power.on_usb() is True)
+    check("VBUS high reads as USB", power.on_usb() is True)
     machine_mod.Pin.usb_present = 0
-    check("radio up: falls back to VBUS sense (battery)", power.on_usb() is False)
-    machine_mod.Pin.usb_present = 1
+    set_supply(3.9)
+    check("VBUS low reads as battery", power.on_usb() is False)
 
+    # VSYS is only the fallback, for when the pin cannot be read at all.
     broken = machine_mod.Pin
 
-    class Exploding:
-        IN = 0
-        OUT = 1
+    class NoVbusPin(broken):
+        """Only the named VBUS pin fails; numbered pins still work, so the
+        VSYS fallback has something to stand on."""
 
-        def __init__(self, *a, **kw):
-            raise RuntimeError("no such pin")
+        def __init__(self, name, mode=None, *a, **kw):
+            if name == "WL_GPIO2":
+                raise RuntimeError("no such pin")
+            broken.__init__(self, name, mode, *a, **kw)
 
-    machine_mod.Pin = Exploding
-    check("with nothing readable it assumes USB (only costs power now)",
-          power.on_usb() is True)
-    machine_mod.Pin = broken
-    WLAN.is_active = False
+    machine_mod.Pin = NoVbusPin
+    check("with no VBUS pin it falls back to VSYS (battery)",
+          power.on_usb() is False)
     set_supply(4.8)
+    check("...and the same fallback sees USB at 4.8V", power.on_usb() is True)
+    machine_mod.Pin = broken
+    machine_mod.Pin.usb_present = 1
+    set_supply(4.8)
+
+    WLAN.is_active = True
+    check("VSYS refuses to read while the WiFi radio is up",
+          power.vsys() is None)
+    WLAN.is_active = False
+    check("...and reads once it is down", power.vsys() is not None)
 
 
 def test_wifi_selection():
@@ -1329,10 +1347,12 @@ def test_power_modes():
     for mode, usb, expected in (("awake", 0, True), ("awake", 1, True),
                                 ("sleep", 0, False), ("sleep", 1, False),
                                 ("auto", 1, True), ("auto", 0, False)):
+        Pin.usb_present = usb
         set_supply(4.8 if usb else 3.9)
         check("%s on %s -> %s" % (mode, "USB" if usb else "battery",
                                   "awake" if expected else "sleep"),
               app._stay_awake(mode) is expected)
+    Pin.usb_present = 1
     set_supply(4.8)
 
     CONFIG.POWER_MODE = "nonsense"
@@ -1678,8 +1698,24 @@ def test_runlog():
     check("VSYS reads when the radio is off", power.vsys() is not None, power.vsys())
     check("VSYS is converted to volts", 4.6 < power.vsys() < 5.0, power.vsys())
     WLAN.is_active = True
-    check("VSYS refuses while the radio is on", power.vsys() is None)
+    check("VSYS refuses while the WiFi radio is on", power.vsys() is None)
     WLAN.is_active = False
+
+    # Bluetooth shares the chip and the SPI bus, so it must block it too -
+    # signalled by a flag, not by asking the bluetooth module, which would
+    # mean poking the very chip we are trying not to disturb.
+    power.RADIO_BUSY = True
+    check("VSYS refuses while Bluetooth is scanning", power.vsys() is None)
+    power.RADIO_BUSY = False
+    check("...and reads again afterwards", power.vsys() is not None)
+
+    from badgersett import scan as scan_probe
+    seen = []
+    real_vsys = power.vsys
+    power.vsys = lambda *a, **k: seen.append(power.RADIO_BUSY)
+    scan_probe.ble_scan(20)
+    power.vsys = real_vsys
+    check("the flag is cleared again after a scan", power.RADIO_BUSY is False)
 
     off = runlog_mod.RunLog(enabled=False)
     off.write("boot")
@@ -1707,11 +1743,54 @@ def test_runlog():
     os.remove(path)
 
 
+def test_photo_blit():
+    print("\nphoto blit (no PNG decoder)")
+    import types as _types
+    fb_path = "/tmp/badgersett_photo.fb"
+    stride = ui.HEIGHT // 8
+    wanted = ui.PHOTO_W * stride
+    # A recognisable pattern: alternate columns solid black / solid white.
+    data = bytearray()
+    for x in range(ui.PHOTO_W):
+        data.extend(b"\x00" * stride if x % 2 == 0 else b"\xff" * stride)
+    open(fb_path, "wb").write(bytes(data))
+
+    cfg = _types.SimpleNamespace(NAME="Chris Wenham", TITLE="T", ORG="", PHOTO=fb_path)
+    fb = bytearray(b"\xff" * (ui.WIDTH * stride))
+    display = FakeDisplay()
+    screen = ui.UI(display, cfg, fb)
+    check("the blit reports success", screen._photo() is True)
+    check("it wrote exactly the photo's bytes",
+          bytes(fb[:wanted]) == bytes(data), (fb[:4], data[:4]))
+    check("it left the rest of the panel alone",
+          set(fb[wanted:]) == {0xFF}, sorted(set(fb[wanted:]))[:3])
+    check("%d bytes, not 48KB" % wanted, wanted == 1536, wanted)
+
+    # Anything wrong falls back to initials rather than failing.
+    display = FakeDisplay()
+    bad = _types.SimpleNamespace(NAME="Chris Wenham", TITLE="T", ORG="",
+                                 PHOTO="/tmp/badgersett_missing.fb")
+    screen = ui.UI(display, bad, bytearray(ui.WIDTH * stride))
+    check("a missing file falls back to initials", screen._photo() is False)
+    drawn = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("...and the initials are drawn", "CW" in drawn, drawn)
+
+    open(fb_path, "wb").write(b"\x00" * 100)      # wrong size
+    display = FakeDisplay()
+    screen = ui.UI(display, cfg, bytearray(ui.WIDTH * stride))
+    check("a wrong-sized file falls back too", screen._photo() is False)
+
+    display = FakeDisplay()
+    screen = ui.UI(display, cfg, None)
+    check("with no framebuffer it falls back", screen._photo() is False)
+    os.remove(fb_path)
+
+
 def test_scanner():
     print("\nradio scanner (the secret screen)")
     from badgersett import scan as scan_mod
     WLAN = sys.modules["network"].WLAN
-    FakeBLE = sys.modules["bluetooth"].BLE
+    FakeBLE = sys.modules["bluetooth"].FakeBLE   # the class, not the BLE() factory
     scan_mod.PATH = "/tmp/badgersett_scan.json"
     if os.path.exists(scan_mod.PATH):
         os.remove(scan_mod.PATH)
@@ -2210,6 +2289,7 @@ def main():
     test_gas_warmup_gate()
     test_power_detection()
     test_wifi_selection()
+    test_photo_blit()
     test_scanner()
     test_scanner_screens()
     test_power_modes()

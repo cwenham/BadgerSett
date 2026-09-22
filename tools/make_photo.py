@@ -22,6 +22,31 @@ except ImportError:
     sys.exit("Pillow is needed: pip3 install Pillow")
 
 PANEL = (296, 128)
+PANEL_H = 128
+
+
+def pack_framebuffer(image, panel_h=PANEL_H):
+    """Pack a 1-bit image into the Badger's own framebuffer layout.
+
+    The panel stores one byte per 8 vertical pixels, column by column:
+    byte index = x * (panel_h / 8) + y // 8, bit 7 - (y % 8), and a set bit
+    is white. A full-height image at x=0 therefore occupies the first
+    width * (panel_h / 8) bytes exactly, so the badge can draw it with one
+    slice assignment - no PNG decoder, and no 48KB allocation that can
+    fail after the network has fragmented the heap.
+    """
+    width, height = image.size
+    if height > panel_h:
+        raise ValueError("image is taller than the panel")
+    pixels = image.load()
+    stride = panel_h // 8
+    out = bytearray(width * stride)
+    for x in range(width):
+        for y in range(panel_h):
+            white = True if y >= height else pixels[x, y] != 0
+            if white:
+                out[x * stride + (y >> 3)] |= 0x80 >> (y & 7)
+    return bytes(out)
 
 
 def parse_size(text):
@@ -114,8 +139,13 @@ def main():
 
     size = os.path.getsize(args.output)
     print("wrote %s  %dx%d  %d bytes" % (args.output, image.width, image.height, size))
-    if size > 20000:
-        print("warning: that is large for the badge's flash; try a smaller --size")
+
+    # The badge draws this one, not the PNG. The PNG is kept for previewing.
+    fb_path = args.output.rsplit(".", 1)[0] + ".fb"
+    with open(fb_path, "wb") as handle:
+        handle.write(pack_framebuffer(image))
+    print("wrote %s  %d bytes  <- this is what the badge loads" %
+          (fb_path, os.path.getsize(fb_path)))
 
     if args.preview:
         preview = args.output.rsplit(".", 1)[0] + "_preview.png"
@@ -123,7 +153,7 @@ def main():
         print("wrote %s (4x, for checking it reads well)" % preview)
 
     print("\nNow set PHOTO = \"%s\" in config.py and upload it alongside main.py."
-          % os.path.basename(args.output))
+          % os.path.basename(fb_path))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import gc
 import json
 import time
 
-from . import util
+from . import power, util
 
 PATH = "scan.json"
 MAX_ENTRIES = 90          # bounds both the file and the memory it parses back
@@ -89,6 +89,7 @@ def ble_scan(duration_ms=6000):
         return []
 
     try:
+        power.RADIO_BUSY = True      # keep vsys() off the shared SPI bus
         ble = bluetooth.BLE()
         ble.active(True)
         done = [False]
@@ -132,6 +133,7 @@ def ble_scan(duration_ms=6000):
                 ble.active(False)
             except Exception:
                 pass
+        power.RADIO_BUSY = False
         gc.collect()
 
     entries = []

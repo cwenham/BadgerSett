@@ -315,7 +315,15 @@ def run():
     display.set_update_speed(badger2040.UPDATE_NORMAL)
 
     state = State()
-    screen = ui.UI(display, config)
+
+    # Own the panel's framebuffer so the photo can be blitted into it.
+    framebuffer = bytearray(ui.WIDTH * ui.HEIGHT // 8)
+    try:
+        display.display.set_framebuffer(framebuffer)
+    except Exception as exc:
+        util.log("external framebuffer unavailable (%s); photo will fall back" % exc)
+        framebuffer = None
+    screen = ui.UI(display, config, framebuffer)
 
     # The RP2040's clock is wiped by every power cut; the PCF85063A keeps
     # running on its own. Restore from it before deciding anything.
