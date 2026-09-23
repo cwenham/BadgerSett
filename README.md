@@ -523,3 +523,13 @@ is genuinely nothing in force for your region.
 **Screen shows stale data** — that is deliberate. A failed refresh keeps
 the last good forecast and flags `OFFLINE` in the status line rather than
 blanking the screen.
+
+## License
+
+The code is MIT licensed — see [LICENSE](LICENSE).
+
+**The photographs are not.** `cwenhamBadge.jpg`, `cwenhamBadge.png` and
+`cwenhamBadge.fb` are pictures of a person, included so the badge works
+out of the box, and they are excluded from that licence: all rights
+reserved. Replace them with your own before reusing this — which you
+want to do anyway, since it is meant to be your face on your badge.
