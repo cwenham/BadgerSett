@@ -116,6 +116,15 @@ LOW_BATTERY_V = 3.2
 # --------------------------------------------------------------------------
 # Hardware on the Qw/ST chain
 # --------------------------------------------------------------------------
+# Both breakouts are optional. Set either to False if you do not have
+# that board and the badge will not look for it: no "offline" warning, no
+# empty column on the detail view, and nothing wasted scanning the bus.
+# Everything else - weather, warnings, news, the scanner - works without
+# them. With BME688_ENABLED = False there is nothing to keep warm, so
+# POWER_MODE "auto" simply sleeps.
+BME688_ENABLED = True
+HAPTIC_ENABLED = True
+
 I2C_SDA = 4                     # Badger 2040 W Qw/ST connector = GP4/GP5 (I2C0)
 I2C_SCL = 5
 BME688_ADDRESS = 0x77           # 0x76 if you bridge the address jumper
@@ -124,7 +133,6 @@ DRV2605_ADDRESS = 0x5A
 # The Pimoroni haptic breakout ships with a linear resonant actuator.
 # Set to "ERM" if you soldered on an eccentric-rotating-mass motor instead.
 HAPTIC_ACTUATOR = "LRA"
-HAPTIC_ENABLED = True
 HAPTIC_QUIET_HOURS = (22, 7)    # (start_hour, end_hour) local; None to disable
 
 # --------------------------------------------------------------------------

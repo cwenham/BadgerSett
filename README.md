@@ -37,15 +37,45 @@ chest with a haptic buzzer when something is about to go wrong.
 
 ## Hardware
 
-| Part | Notes |
-|---|---|
-| Badger 2040 **W** | The W is required — the non-W has no WiFi. |
-| Adafruit BME688 | I²C `0x77` (`0x76` if you bridged the jumper) |
-| Pimoroni DRV2605L haptic buzzer | I²C `0x5A` |
+| Part | Required? | Notes |
+|---|---|---|
+| Badger 2040 **W** | **yes** | The W is required — the non-W has no WiFi. |
+| Adafruit BME688 | optional | I²C `0x77` (`0x76` if you bridged the jumper) |
+| Pimoroni DRV2605L haptic buzzer | optional | I²C `0x5A` |
 
 Both breakouts chain off the Qw/ST connector, which is **GP4 (SDA) /
 GP5 (SCL)** — I²C bus 0. Daisy-chain them with a Qw/ST cable; the
 addresses do not collide.
+
+## Running without the breakouts
+
+Both I²C boards are optional. With neither fitted you still get the badge,
+the forecast, Met Office warnings, BBC headlines, the radio scanner and
+the clock — everything except indoor readings and the buzz.
+
+```python
+BME688_ENABLED = False      # no temperature, humidity, pressure or air quality
+HAPTIC_ENABLED = False      # alerts appear on screen but do not buzz
+```
+
+Setting these to `False` means the badge does not go looking for that
+board, so its absence is never reported as a fault. It matters that this
+is distinct from a board that *is* fitted and not answering, which is a
+real problem and still says `NO BME` in the status line and `Sensor not
+responding` on the detail view.
+
+Without a sensor the detail view drops the `INSIDE` column and lays the
+forecast across the full width instead, adding humidity and tomorrow's
+rain chance rather than leaving an empty box. The badge view simply omits
+its indoor line.
+
+`POWER_MODE = "auto"` also stops staying awake on USB when no sensor is
+fitted — staying awake exists to keep the gas heater conditioned, and with
+no heater there is nothing to keep warm. An explicit `"awake"` is still
+honoured if you want the faster button response.
+
+Leaving an enabled board absent is handled too: the badge logs it, draws
+everything else, and carries on.
 
 ## Firmware
 

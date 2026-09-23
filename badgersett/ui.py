@@ -176,7 +176,7 @@ class UI:
         if status.get("muted"):
             flags.append("MUTE")
         if status.get("sensor") is False:
-            flags.append("NO BME")
+            flags.append("NO BME")      # fitted but not answering; None = not fitted
         if status.get("awake"):
             flags.append("AWAKE")
         flags.append(VIEW_NAMES[status.get("view", 0)])
@@ -255,7 +255,9 @@ class UI:
             if indoor.get("pressure"):
                 parts.append("%d hPa" % round(indoor["pressure"]))
             d.text(util.truncate(d, "  ".join(parts), PANE_W - 8), PANE_X, 85, scale=1)
-        else:
+        elif status.get("sensor") is not None:
+            # Fitted but not answering is worth saying. Not fitted at all is
+            # not a fault, so the line is simply left out.
             d.text("Sensor offline", PANE_X, 85, scale=1)
 
         # Alert banner, or a quiet spacer
@@ -299,15 +301,20 @@ class UI:
             d.set_font("bitmap6")
             d.text(util.truncate(d, place, COL2_X - 70), 62, 5, scale=1)
             d.set_font("bitmap8")
-        d.text("INSIDE", COL2_X, 4, scale=1)
+        if status.get("sensor") is not None:
+            d.text("INSIDE", COL2_X, 4, scale=1)
         if clock:
             d.set_font("bitmap6")
             d.text(clock, WIDTH - d.measure_text(clock, 1) - 4, 5, scale=1)
         d.set_pen(BLACK)
-        d.rectangle(DIVIDER_X, 17, 1, 92)
+        if status.get("sensor") is not None:
+            d.rectangle(DIVIDER_X, 17, 1, 92)
 
-        # --- outside -----------------------------------------------------
-        left_w = DIVIDER_X - 10
+        # With no sensor fitted there is nothing to put in the right-hand
+        # column, so the forecast gets the whole panel instead of sitting
+        # beside an empty box.
+        sensor_fitted = status.get("sensor") is not None
+        left_w = (DIVIDER_X - 10) if sensor_fitted else (WIDTH - 10)
         if weather:
             label, icon_key = weather_api.describe(weather.get("code"))
             if icon_key == "sun" and not weather.get("is_day", True):
@@ -329,12 +336,26 @@ class UI:
                 rows.append("Rain %d%%" % weather["pop"])
             if weather.get("hi2") is not None:
                 rows.append("Tomorrow %d/%d" % (round(weather["hi2"]), round(weather["lo2"])))
+            if not sensor_fitted:
+                # Room for more, now the right-hand column is free.
+                if weather.get("humidity") is not None:
+                    rows.append("Humidity %d%%" % round(weather["humidity"]))
+                if weather.get("pop2") is not None:
+                    rows.append("Tomorrow rain %d%%" % weather["pop2"])
 
             d.set_font("bitmap6")
-            y = 48
-            for text in rows[:6]:
-                d.text(util.truncate(d, text, left_w), 4, y, scale=1)
-                y += 10
+            if sensor_fitted:
+                y = 48
+                for text in rows[:6]:
+                    d.text(util.truncate(d, text, left_w), 4, y, scale=1)
+                    y += 10
+            else:
+                # Two columns across the full width.
+                column_w = WIDTH // 2 - 10
+                for index, text in enumerate(rows[:12]):
+                    col, row = index // 6, index % 6
+                    d.text(util.truncate(d, text, column_w),
+                           4 + col * (WIDTH // 2), 48 + row * 10, scale=1)
         else:
             d.set_font("bitmap6")
             d.text("No forecast yet", 4, 48, scale=1)
@@ -342,7 +363,9 @@ class UI:
 
         # --- inside ------------------------------------------------------
         right_w = WIDTH - COL2_X - 4
-        if indoor:
+        if not sensor_fitted:
+            indoor = None            # nothing to draw, and no fault to report
+        elif indoor:
             _temp(d, indoor.get("temp"), COL2_X, 20, scale=2)
             d.set_font("bitmap6")
             rows = ["Humidity %.0f%%" % indoor["humidity"]]
@@ -395,7 +418,7 @@ class UI:
                 tick = COL2_X + int(bar_w / 1.2)
                 d.rectangle(tick, 97, 1, 3)
                 d.rectangle(tick, 110, 1, 3)
-        else:
+        elif sensor_fitted:
             d.set_font("bitmap6")
             d.text("Sensor not", COL2_X, 48, scale=1)
             d.text("responding", COL2_X, 58, scale=1)

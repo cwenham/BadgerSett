@@ -77,13 +77,19 @@ def _power_mode():
     return mode
 
 
-def _stay_awake(mode):
-    """awake: always. sleep: never. auto: only while on USB power."""
+def _stay_awake(mode, have_sensor=True):
+    """awake: always. sleep: never. auto: on USB, if there is a sensor.
+
+    Staying awake exists to keep the BME688's gas heater conditioned, so
+    with no sensor fitted "auto" has nothing to stay awake for and sleeps.
+    An explicit "awake" is still honoured - someone may want the faster
+    button response.
+    """
     if mode == "awake":
         return True
     if mode == "sleep":
         return False
-    return power.on_usb()
+    return have_sensor and power.on_usb()
 
 
 def _retry_ok():
@@ -331,24 +337,33 @@ def run():
 
     location = state.get("location") or {}
 
+    # Both breakouts are optional. Skipping a disabled one entirely means
+    # its absence is never reported as a fault.
+    want_sensor = getattr(config, "BME688_ENABLED", True)
+    want_haptic = getattr(config, "HAPTIC_ENABLED", True)
+
     i2c = None
     bme = haptic = None
-    try:
-        i2c = sensor.make_i2c(getattr(config, "I2C_SDA", 4), getattr(config, "I2C_SCL", 5))
-    except Exception as exc:
-        util.log("I2C bus failed:", exc)
+    if want_sensor or want_haptic:
+        try:
+            i2c = sensor.make_i2c(getattr(config, "I2C_SDA", 4),
+                                  getattr(config, "I2C_SCL", 5))
+        except Exception as exc:
+            util.log("I2C bus failed:", exc)
+    else:
+        util.log("no breakouts configured; running on the badge alone")
 
-    if i2c:
+    if i2c and want_sensor:
         bme = Sensor(i2c, getattr(config, "BME688_ADDRESS", 0x77),
                      location.get("altitude"))
         if bme.error:
             util.log(bme.error)
-        if getattr(config, "HAPTIC_ENABLED", True):
-            haptic = Haptics(i2c, getattr(config, "DRV2605_ADDRESS", 0x5A),
-                             getattr(config, "HAPTIC_ACTUATOR", "LRA"),
-                             state.get("cal"))
-            if haptic.error:
-                util.log(haptic.error)
+    if i2c and want_haptic:
+        haptic = Haptics(i2c, getattr(config, "DRV2605_ADDRESS", 0x5A),
+                         getattr(config, "HAPTIC_ACTUATOR", "LRA"),
+                         state.get("cal"))
+        if haptic.error:
+            util.log(haptic.error)
 
     log = runlog.RunLog(getattr(config, "RUNTIME_LOG", False),
                         getattr(config, "RUNTIME_LOG_MINUTES", 10),
@@ -433,7 +448,7 @@ def run():
         # Gas is only meaningful while the badge stays awake to keep the
         # heater cycling; a sleeping badge's heater is always cold.
         mode = _power_mode()
-        awake = _stay_awake(mode)
+        awake = _stay_awake(mode, bool(bme and bme.ok))
         indoor = _indoor_reading(bme, awake, carried)
         carried = None
         if indoor:
@@ -530,7 +545,8 @@ def run():
             "updated": updated or "no data yet",
             "online": online,
             "muted": state.get("muted"),
-            "sensor": bool(bme and bme.ok),
+            # True working, False fitted but not answering, None not fitted.
+            "sensor": (bool(bme and bme.ok) if want_sensor else None),
             "location": (state.get("location") or {}).get("label"),
             "awake": awake,
             "view": view,

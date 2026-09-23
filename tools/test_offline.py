@@ -391,6 +391,7 @@ def install_fakes():
     cfg.SENSOR_ONLY_ON_BUTTON = True
     cfg.I2C_SDA, cfg.I2C_SCL = 4, 5
     cfg.BME688_ADDRESS, cfg.DRV2605_ADDRESS = 0x77, 0x5A
+    cfg.BME688_ENABLED = True
     cfg.HAPTIC_ACTUATOR = "LRA"
     cfg.HAPTIC_ENABLED = True
     cfg.HAPTIC_QUIET_HOURS = (22, 7)
@@ -2127,6 +2128,105 @@ def test_secret_screen_flow():
                 os.remove(path)
 
 
+def test_without_breakouts():
+    print("\nrunning without the optional boards")
+    from badgersett import app
+    machine_mod = sys.modules["machine"]
+    badger = sys.modules["badger2040"]
+    real_i2c, real_display = machine_mod.I2C, badger.Badger2040
+    app._last_attempt = None
+
+    class Stop(BaseException):
+        pass
+
+    def run_with(devices, want_sensor, want_haptic):
+        """One cycle with a given bus population and config."""
+        machine_mod.I2C = lambda *a, **kw: FakeI2C(devices=devices)
+        CONFIG.BME688_ENABLED, CONFIG.HAPTIC_ENABLED = want_sensor, want_haptic
+        CONFIG.POWER_MODE = "sleep"
+        state_mod.PATH = "/tmp/badgersett_nohw.json"
+        if os.path.exists(state_mod.PATH):
+            os.remove(state_mod.PATH)
+        seen = []
+        badger.Badger2040 = lambda: seen.append(FakeDisplay()) or seen[-1]
+        badger.sleep_for = lambda m: (_ for _ in ()).throw(Stop())
+        crashed = None
+        try:
+            app.run()
+        except Stop:
+            pass
+        except Exception as exc:
+            crashed = exc
+        text = " ".join(str(c[1][0]) for c in seen[0].calls if c[0] == "text") if seen else ""
+        return crashed, text, (seen[0] if seen else None)
+
+    try:
+        crashed, text, disp = run_with([], False, False)
+        check("neither board: completes a cycle", crashed is None, crashed)
+        check("neither board: still draws a screen", disp and disp.updates == 1)
+        check("neither board: no 'NO BME' warning", "NO BME" not in text, text[-60:])
+        check("neither board: does not claim the sensor is offline",
+              "Sensor offline" not in text, text[-60:])
+        check("neither board: nothing drawn off-panel", not disp.out_of_bounds,
+              disp.out_of_bounds[:2])
+
+        crashed, text, disp = run_with([0x5A], False, True)
+        check("haptics only: completes a cycle", crashed is None, crashed)
+        check("haptics only: no sensor complaint", "NO BME" not in text)
+
+        crashed, text, disp = run_with([0x77], True, False)
+        check("sensor only: completes a cycle", crashed is None, crashed)
+        check("sensor only: no haptic complaint", crashed is None)
+
+        # Fitted but silent IS a fault, and should say so.
+        crashed, text, disp = run_with([], True, True)
+        check("sensor expected but absent: completes anyway", crashed is None, crashed)
+        check("sensor expected but absent: warns", "NO BME" in text, text[-70:])
+
+        check("auto mode does not stay awake with no sensor to warm",
+              app._stay_awake("auto", have_sensor=False) is False)
+        check("...but an explicit awake is still honoured",
+              app._stay_awake("awake", have_sensor=False) is True)
+    finally:
+        machine_mod.I2C, badger.Badger2040 = real_i2c, real_display
+        CONFIG.BME688_ENABLED = CONFIG.HAPTIC_ENABLED = True
+        CONFIG.POWER_MODE = "sleep"
+        app._last_attempt = None
+        if os.path.exists(state_mod.PATH):
+            os.remove(state_mod.PATH)
+
+
+def test_screens_without_sensor():
+    print("\nscreens without a sensor fitted")
+    status = {"updated": "Updated 17:15", "online": True, "muted": False,
+              "sensor": None, "view": 1, "credit": "Open-Meteo", "location": "Home"}
+    st = state_mod.State()
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, None, st, [], status)
+    text = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("no INSIDE heading", "INSIDE" not in text, text[:60])
+    check("no 'Sensor not responding'", "responding" not in text, text[:80])
+    check("the forecast fills the width instead",
+          "Humidity" in text and "Tomorrow" in text, text[:110])
+    check("nothing off-panel", not display.out_of_bounds, display.out_of_bounds[:2])
+    xs = [c[1][1] for c in display.calls if c[0] == "text"]
+    check("it uses the right-hand half", max(xs) > ui.DIVIDER_X, max(xs))
+
+    # Fitted but silent still reports the fault.
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).detail_view(SAMPLE_WEATHER, None, st,
+                                       [], dict(status, sensor=False))
+    text = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("a fitted-but-silent sensor still says so", "responding" in text, text[:80])
+
+    display = FakeDisplay()
+    ui.UI(display, CONFIG).badge(SAMPLE_WEATHER, None, [], dict(status, view=0))
+    text = " ".join(str(c[1][0]) for c in display.calls if c[0] == "text")
+    check("badge view omits the indoor line when nothing is fitted",
+          "Sensor offline" not in text, text[-60:])
+
+
 def test_app_cycle():
     print("\nfull wake cycle (app.py)")
     from badgersett import app, nws as nws_mod, weather as weather_mod
@@ -2302,6 +2402,8 @@ def main():
     test_buttons()
     test_layouts()
     test_secret_screen_flow()
+    test_without_breakouts()
+    test_screens_without_sensor()
     test_app_cycle()
     print("\n%s" % ("-" * 46))
     if FAILURES:
