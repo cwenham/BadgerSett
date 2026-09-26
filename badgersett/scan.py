@@ -13,7 +13,7 @@ import gc
 import json
 import time
 
-from . import power, util
+from . import net, power, util
 
 PATH = "scan.json"
 MAX_ENTRIES = 90          # bounds both the file and the memory it parses back
@@ -57,10 +57,14 @@ def _addr_kind(addr_type, addr):
 def wifi_scan():
     """Visible access points, strongest first, one entry per SSID."""
     entries = {}
+    was_powered = None
     try:
         import network
         wlan = network.WLAN(network.STA_IF)
-        was_active = wlan.active()
+        # Whether the chip had power before we arrived, not whether the
+        # interface was "active": those are different questions, and only
+        # the first one decides if we should switch it off afterwards.
+        was_powered = net.radio_powered()
         wlan.active(True)
         for result in wlan.scan():
             ssid, _bssid, channel, rssi, security = result[0], result[1], result[2], result[3], result[4]
@@ -71,10 +75,11 @@ def wifi_scan():
             if current is None or rssi > current["r"]:
                 entries[ssid] = {"k": "W", "n": ssid, "r": rssi, "i": ssid,
                                  "x": "ch%d %s" % (channel, SECURITY.get(security, "?"))}
-        if not was_active:
-            wlan.active(False)
     except Exception as exc:
         util.log("wifi scan failed:", exc)
+    finally:
+        if not was_powered:      # False, or unknown
+            net.radio_off()
     return list(entries.values())
 
 
@@ -82,6 +87,7 @@ def ble_scan(duration_ms=6000):
     """BLE advertisers heard in `duration_ms`, one entry per address."""
     found = {}
     ble = None
+    was_powered = None
     try:
         import bluetooth
     except ImportError:
@@ -90,6 +96,7 @@ def ble_scan(duration_ms=6000):
 
     try:
         power.RADIO_BUSY = True      # keep vsys() off the shared SPI bus
+        was_powered = net.radio_powered()
         ble = bluetooth.BLE()
         ble.active(True)
         done = [False]
@@ -133,6 +140,12 @@ def ble_scan(duration_ms=6000):
                 ble.active(False)
             except Exception:
                 pass
+        # Bluetooth and WiFi are the same chip, and ble.active(False) no
+        # more powers it down than wlan.active(False) does. Without this
+        # the radio idles on after every visit to the scanner, until the
+        # next refresh happens to deinit it.
+        if not was_powered:      # False, or unknown
+            net.radio_off()
         power.RADIO_BUSY = False
         gc.collect()
 

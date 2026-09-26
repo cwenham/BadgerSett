@@ -171,6 +171,50 @@ def connect(ssid, password, country="GB", timeout=25):
     return config
 
 
+# WL_REG_ON, the CYW43's regulator enable, is GP23 on a Pico W. Reading
+# the SIO input register is the ground truth for whether the wireless chip
+# is drawing power, and unlike constructing a Pin object it cannot change
+# the state by being asked.
+_SIO_GPIO_IN = 0xd0000004
+_WL_REG_ON = 23
+
+
+def radio_powered():
+    """True if the CYW43 currently has power.
+
+    Falls back to the interface's own idea of being active on anything
+    that is not a Pico W, where GP23 means something else entirely.
+    """
+    try:
+        import machine
+        return bool((machine.mem32[_SIO_GPIO_IN] >> _WL_REG_ON) & 1)
+    except Exception:
+        pass
+    try:
+        return bool(network.WLAN(network.STA_IF).active())
+    except Exception:
+        return None
+
+
+def radio_off():
+    """Cut power to the CYW43.
+
+    active(False) is NOT enough. Measured on the badge, WL_REG_ON stays
+    high after active(False) and only drops on deinit() - so a radio that
+    looks inactive goes on idling at several mA, which on battery is the
+    same order as everything else the badge does put together.
+    """
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        try:
+            wlan.active(False)
+        except Exception:
+            pass
+        wlan.deinit()
+    except Exception as exc:
+        util.log("radio power-down:", exc)
+
+
 def disconnect(wlan=None):
     """Drop the link and power down the radio — it is the biggest draw."""
     try:
@@ -178,6 +222,8 @@ def disconnect(wlan=None):
         if wlan.isconnected():
             wlan.disconnect()
         wlan.active(False)
+        # deinit() is what actually drops WL_REG_ON; active(False) alone
+        # leaves the chip powered. Not optional.
         try:
             wlan.deinit()
         except Exception:

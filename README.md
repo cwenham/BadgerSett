@@ -518,6 +518,30 @@ path is tested rather than assumed.
 from the log on the badge, splitting it into power-on sessions and
 skipping the ones that were really on USB.
 
+### The radio is off between refreshes
+
+It is, and you can check rather than trust it: `WL_REG_ON` is GP23 on a
+Pico W, and reading bit 23 of the SIO input register at `0xd0000004` says
+whether the CYW43 has power. Measured through a refresh:
+
+```
+at boot, WiFi never touched     WL_REG_ON=0
+after active(True)              WL_REG_ON=1
+while associated                WL_REG_ON=1
+after net.disconnect()          WL_REG_ON=0
+```
+
+**`active(False)` does not do this.** It leaves `WL_REG_ON` high and the
+chip idling; only `deinit()` pulls it down. That is a trap, because the
+interface then reports itself inactive while still drawing current, so
+`net.disconnect()` calls `deinit()` and `net.radio_off()` exists for
+everywhere else.
+
+Bluetooth is the same chip and the same trap: `ble.active(False)` leaves
+it powered too. Both scanners used to do exactly that, so every visit to
+the secret screen left the radio running until the next refresh happened
+to deinit it. They now restore whatever power state they found.
+
 Asleep, the badge sets an RTC alarm and cuts its own power — which also
 cuts the 3.3V rail to the BME688. `REFRESH_MINUTES` is then the main
 lever: the WiFi radio dominates consumption.

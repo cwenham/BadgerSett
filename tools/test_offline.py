@@ -217,6 +217,20 @@ def install_fakes():
 
     machine.ADC = _ADC
     machine.I2C = lambda *a, **kw: FakeI2C()
+    class _Mem32:
+        """Just enough SIO to answer 'does the radio have power?'."""
+
+        SIO_GPIO_IN = 0xd0000004
+
+        def __getitem__(self, addr):
+            if addr == self.SIO_GPIO_IN:
+                return (1 << 23) if network.WLAN.powered else 0
+            return 0
+
+        def __setitem__(self, addr, value):
+            pass
+
+    machine.mem32 = _Mem32()
     sys.modules["machine"] = machine
 
     network = types.ModuleType("network")
@@ -239,10 +253,16 @@ def install_fakes():
             pass
 
         is_active = False
+        # Separate from is_active on purpose. On a Pico W, active(False)
+        # leaves WL_REG_ON high and the chip drawing current; only deinit()
+        # pulls it down. A fake that conflates the two cannot catch that.
+        powered = False
 
         def active(self, on=None):
             if on is not None:
                 WLAN.is_active = bool(on)
+                if on:
+                    WLAN.powered = True
                 return None
             return WLAN.is_active
 
@@ -266,7 +286,8 @@ def install_fakes():
             pass
 
         def deinit(self):
-            pass
+            WLAN.is_active = False
+            WLAN.powered = False
 
         def status(self):
             return 3
@@ -329,6 +350,11 @@ def install_fakes():
         def active(self, on=None):
             if on is not None:
                 self._active = bool(on)
+                # One chip, one regulator: bringing Bluetooth up powers the
+                # same CYW43 that WiFi uses, and active(False) no more
+                # switches it off here than it does there.
+                if on:
+                    sys.modules["network"].WLAN.powered = True
                 return None
             return self._active
 
@@ -1866,6 +1892,9 @@ def test_scanner():
     check("wifi entries carry channel and security",
           all("ch" in e["x"] for e in wifi), wifi[:1])
     check("the radio is left off afterwards", WLAN.is_active is False)
+    # active(False) is not enough on real hardware, so assert on power.
+    check("...and actually unpowered, not merely inactive",
+          WLAN.powered is False, WLAN.powered)
 
     ble = scan_mod.ble_scan(50)
     check("bluetooth scan finds each distinct address", len(ble) == 5, ble)
@@ -1874,6 +1903,11 @@ def test_scanner():
     check("an unnamed device falls back to its maker", "Apple" in labels, labels)
     check("otherwise it falls back to part of the address",
           any(":" in l for l in labels), labels)
+    # Bluetooth and WiFi are one chip. A scan that leaves it powered costs
+    # battery until the next refresh happens to deinit it.
+    check("a bluetooth scan leaves the radio unpowered too",
+          sys.modules["network"].WLAN.powered is False,
+          sys.modules["network"].WLAN.powered)
     apple = [e for e in ble if e["n"] == "Apple"][0]
     check("repeat sightings keep the strongest signal", apple["r"] == -49, apple)
     check("a rotating address is flagged as such", "rotating" in apple["x"], apple)
@@ -1884,6 +1918,9 @@ def test_scanner():
     FakeBLE.fail = False
 
     entries = scan_mod.survey(50, True)
+    check("a full survey leaves the radio unpowered",
+          sys.modules["network"].WLAN.powered is False,
+          sys.modules["network"].WLAN.powered)
     check("survey merges both radios", len(entries) == 9, len(entries))
     check("sorted strongest first",
           entries == sorted(entries, key=lambda e: -e["r"]), [e["r"] for e in entries])
@@ -2453,6 +2490,9 @@ def test_app_cycle():
           displays[0].speeds if displays else "no display")
     check("it slept for the configured interval", slept == [CONFIG.REFRESH_MINUTES], slept)
     check("the forecast was fetched", any("open-meteo" in u for u in calls), calls)
+    check("the radio is powered down again after a refresh",
+          sys.modules["network"].WLAN.powered is False,
+          sys.modules["network"].WLAN.powered)
     check("Met Office warnings were fetched for the network's region",
           any("metoffice.gov.uk" in u and u.endswith("/se") for u in calls), calls)
     check("the forecast used the joined network's coordinates",
