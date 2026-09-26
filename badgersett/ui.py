@@ -334,14 +334,16 @@ class UI:
                 rows.append("Gusts %d %s" % (round(weather["gust_max"]), util.speed_unit()))
             if weather.get("pop") is not None:
                 rows.append("Rain %d%%" % weather["pop"])
+            # With no sensor fitted the right-hand column is free, so the
+            # forecast gets two extra rows. Humidity joins today's block
+            # rather than trailing after it, keeping tomorrow's two rows
+            # together at the end.
+            if not sensor_fitted and weather.get("humidity") is not None:
+                rows.append("Humidity %d%%" % round(weather["humidity"]))
             if weather.get("hi2") is not None:
                 rows.append("Tomorrow %d/%d" % (round(weather["hi2"]), round(weather["lo2"])))
-            if not sensor_fitted:
-                # Room for more, now the right-hand column is free.
-                if weather.get("humidity") is not None:
-                    rows.append("Humidity %d%%" % round(weather["humidity"]))
-                if weather.get("pop2") is not None:
-                    rows.append("Tomorrow rain %d%%" % weather["pop2"])
+            if not sensor_fitted and weather.get("pop2") is not None:
+                rows.append("Tomorrow rain %d%%" % weather["pop2"])
 
             d.set_font("bitmap6")
             if sensor_fitted:

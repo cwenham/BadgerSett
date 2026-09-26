@@ -425,11 +425,24 @@ or two high; mount the breakout away from the board if that bothers you.
 
 `POWER_MODE` decides how the badge spends the time between refreshes:
 
-| Mode | Between refreshes | Gas readings | Battery life (2000 mAh, est.) |
+| Mode | Between refreshes | Gas readings | Battery life (2000 mAh) |
 |---|---|---|---|
-| `"auto"` (default) | awake on USB, deep sleep on battery | on USB only | months on battery |
-| `"sleep"` | always deep sleep | never | months |
-| `"awake"` | never sleeps; samples every `GAS_SAMPLE_S` | always | roughly 3 days |
+| `"auto"` (default) | awake on USB, deep sleep on battery | on USB only | months on battery (est.) |
+| `"sleep"` | always deep sleep | never | months (est.) |
+| `"awake"` | never sleeps; samples every `GAS_SAMPLE_S` | always | **83 hours, measured** |
+
+The awake figure is not an estimate. A 2000 mAh cell ran the badge in
+`"awake"` mode — heater conditioned every 5 seconds, WiFi refreshes on
+the usual schedule — for **83.3 hours**, from 4.173 V down to the 3.2 V
+cutoff, which works out at about **24 mA average**. The discharge was
+close to linear at roughly 12 mV per hour until the last few hours,
+where it fell away sharply, as lithium cells do. It stopped on its own
+at the cutoff and displayed the charge-me screen, so the protection
+path is tested rather than assumed.
+
+`tools/battery_report.py runtime.log --capacity 2000` prints that curve
+from the log on the badge, splitting it into power-on sessions and
+skipping the ones that were really on USB.
 
 Asleep, the badge sets an RTC alarm and cuts its own power — which also
 cuts the 3.3V rail to the BME688. `REFRESH_MINUTES` is then the main
