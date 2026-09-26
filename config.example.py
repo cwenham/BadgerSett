@@ -106,6 +106,19 @@ POWER_MODE = "auto"
 
 # While awake:
 GAS_SAMPLE_S = 5                # sample the BME688 this often, keeping it conditioned
+# The e-ink flash is the NORMAL waveform inverting the panel to clear it,
+# and it is also what makes a refresh slow: 4.70s at NORMAL against 0.32s
+# at TURBO, measured on a Badger 2040 W. Redraws that do not change mode -
+# a new clock time, new readings, an alert appearing - use the fast
+# waveform instead, so the screen changes without the flash.
+#
+# Fast waveforms leave ghosting. Every GHOST_CLEAR_EVERY-th redraw uses
+# the full waveform to wipe it; 0 disables that, and FAST_REDRAW = False
+# restores the old always-flash behaviour.
+FAST_REDRAW = True
+FAST_REDRAW_SPEED = "turbo"     # "turbo", "fast" or "medium"
+GHOST_CLEAR_EVERY = 12
+
 AWAKE_REDRAW_MINUTES = 5        # redraw the e-ink on this timer (plus buttons/alerts)
 
 # Runtime log for power experiments: appends to runtime.log on boot and

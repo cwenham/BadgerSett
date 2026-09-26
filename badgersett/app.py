@@ -318,6 +318,37 @@ def _refresh_network():
     return forecast, official, headlines, active
 
 
+# E-ink waveforms. The distracting black/white flash is the NORMAL
+# waveform inverting the panel to clear it, and it is also what makes a
+# refresh slow: measured on a Badger 2040 W, a full update takes 4.70s at
+# NORMAL, 2.62s at MEDIUM, 1.00s at FAST and 0.32s at TURBO.
+#
+# partial_update() is not the lever it looks like. Measured on the same
+# board it takes essentially as long as a full update at the same speed
+# (3.74s vs 4.70s at NORMAL; 0.317s vs 0.320s at TURBO) - the cost is in
+# the waveform, not the number of rows. So we change speed rather than
+# tracking dirty rectangles.
+#
+# The faster waveforms do less work to settle each pixel, so they leave
+# ghosting. A periodic NORMAL refresh clears it.
+_SPEEDS = {"normal": badger2040.UPDATE_NORMAL, "medium": badger2040.UPDATE_MEDIUM,
+           "fast": badger2040.UPDATE_FAST, "turbo": badger2040.UPDATE_TURBO}
+
+
+def _redraw_speed(same_view, since_full):
+    """Pick a waveform: fast while the view is unchanged, NORMAL to reset.
+
+    Returns (speed constant, resets_ghosting).
+    """
+    if not getattr(config, "FAST_REDRAW", True) or not same_view:
+        return badger2040.UPDATE_NORMAL, True
+    every = int(getattr(config, "GHOST_CLEAR_EVERY", 12))
+    if every > 0 and since_full >= every:
+        return badger2040.UPDATE_NORMAL, True
+    name = str(getattr(config, "FAST_REDRAW_SPEED", "turbo")).lower()
+    return _SPEEDS.get(name, badger2040.UPDATE_TURBO), False
+
+
 # The RP2040 heap fragments as modules import and objects are built, and
 # MicroPython's GC never compacts. TLS needs one large *contiguous* block
 # for its buffers, so by the time a refresh comes round there can be 100KB
@@ -420,6 +451,8 @@ def run(handover=None):
                         _power_mode())
     log.write("boot", usb=int(power.on_usb()))
     pending = []
+    drawn_view = None    # what is physically on the panel, for the redraw speed
+    since_full = 0       # fast redraws since the last ghost-clearing one
     carried = None       # the awake loop's latest sample, reused by the main loop
     wakes = {}           # why the awake loop ended, counted into the runtime log
 
@@ -608,8 +641,16 @@ def run(handover=None):
             "awake": awake,
             "view": view,
         }
+        # A mode switch (A/B/C) replaces the whole screen, so it may as
+        # well have the clean waveform. Everything else - a clock tick, new
+        # readings, an alert appearing - is a small change to a screen the
+        # reader is already looking at, and flashing it is just noise.
+        speed, cleared = _redraw_speed(view == drawn_view, since_full)
+        display.set_update_speed(speed)
         screen.render(view, forecast, indoor, current, state, status, headlines,
                       scan_data)
+        drawn_view = view
+        since_full = 0 if cleared else since_full + 1
 
         state.save()
         if haptic and haptic.ready:

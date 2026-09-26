@@ -458,6 +458,43 @@ sharp *fall* is the signal that matters.
 The heater also warms the package, so indoor temperature reads a degree
 or two high; mount the breakout away from the board if that bothers you.
 
+## Screen refreshes: the flash, and what it costs
+
+The black/white flash is the `NORMAL` waveform inverting the whole panel
+to clear it. It is also most of what a refresh costs in time. Measured on
+a Badger 2040 W:
+
+| Waveform | Full `update()` | `partial_update()`, 32px band |
+|---|---|---|
+| `NORMAL` | 4.70 s | 3.74 s |
+| `MEDIUM` | 2.62 s | 2.62 s |
+| `FAST` | 1.00 s | 0.99 s |
+| `TURBO` | 0.32 s | 0.32 s |
+
+**`partial_update()` is not the lever it looks like.** Restricting the
+update to a band saves nothing worth having — the cost is in driving the
+waveform, not in the number of rows — so the badge does not track dirty
+rectangles. It changes waveform instead.
+
+A redraw that does not change mode — a new clock time, fresh readings, an
+alert appearing — uses `FAST_REDRAW_SPEED` (default `TURBO`) and does not
+flash. Pressing A, B or C replaces the whole screen anyway, so those take
+the clean `NORMAL` waveform. The first draw after boot does too, since
+nothing is known about what is already on the panel.
+
+Fast waveforms do less work to settle each pixel and leave ghosting, so
+every `GHOST_CLEAR_EVERY`-th redraw (default 12) uses `NORMAL` to wipe it.
+The dithered photo is the part most likely to show residue; if it bothers
+you, lower that number, move `FAST_REDRAW_SPEED` to `"fast"` or
+`"medium"`, or set `FAST_REDRAW = False` to go back to always flashing.
+
+On power the honest answer is: it helps, but it is not where the battery
+goes. The panel only draws current while it updates, so awake mode's
+12 redraws an hour cost roughly 4.70 s each at `NORMAL` against 0.32 s at
+`TURBO` — around a 1% change against the ~24 mA the badge averages, which
+the gas heater and the WiFi radio dominate. The reason to do it is that
+the screen stops flashing every five minutes.
+
 ## Power
 
 `POWER_MODE` decides how the badge spends the time between refreshes:

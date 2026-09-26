@@ -48,6 +48,8 @@ class FakeDisplay:
         self.font = "bitmap8"
         self.pen = 0
         self.updates = 0
+        self.speed = None
+        self.speeds = []
         self.out_of_bounds = []
         self.display = self
 
@@ -73,7 +75,10 @@ class FakeDisplay:
         self.updates += 1
 
     def set_update_speed(self, speed):
-        pass
+        # Recorded, not ignored: which waveform each redraw used is the
+        # difference between a screen that flashes and one that does not.
+        self.speed = speed
+        self.speeds.append(speed)
 
     def set_framebuffer(self, buf):
         self.framebuffer = buf
@@ -2267,6 +2272,57 @@ def test_screens_without_sensor():
           "Sensor offline" not in text, text[-60:])
 
 
+def test_redraw_waveform():
+    print("\ne-ink waveform choice")
+    from badgersett import app
+    import badger2040 as badger
+
+    NORMAL, TURBO, FAST = badger.UPDATE_NORMAL, badger.UPDATE_TURBO, badger.UPDATE_FAST
+    saved = {k: getattr(CONFIG, k, None)
+             for k in ("FAST_REDRAW", "FAST_REDRAW_SPEED", "GHOST_CLEAR_EVERY")}
+    try:
+        CONFIG.FAST_REDRAW = True
+        CONFIG.FAST_REDRAW_SPEED = "turbo"
+        CONFIG.GHOST_CLEAR_EVERY = 12
+
+        # Switching mode redraws everything anyway, so take the clean waveform.
+        check("a mode switch uses the full waveform",
+              app._redraw_speed(False, 0) == (NORMAL, True))
+        # Same screen, new numbers on it: no flash.
+        check("a same-view redraw uses the fast waveform",
+              app._redraw_speed(True, 0) == (TURBO, False))
+        check("...and does not count as clearing ghosting",
+              app._redraw_speed(True, 5)[1] is False)
+
+        # Fast waveforms leave residue, so one in every N has to clear it.
+        check("ghosting is cleared once the run gets long enough",
+              app._redraw_speed(True, 12) == (NORMAL, True))
+        check("...but not before", app._redraw_speed(True, 11)[0] == TURBO)
+
+        CONFIG.GHOST_CLEAR_EVERY = 0
+        check("GHOST_CLEAR_EVERY = 0 never forces a clear",
+              app._redraw_speed(True, 9999) == (TURBO, False))
+        CONFIG.GHOST_CLEAR_EVERY = 12
+
+        CONFIG.FAST_REDRAW_SPEED = "fast"
+        check("the waveform is configurable", app._redraw_speed(True, 0)[0] == FAST)
+        CONFIG.FAST_REDRAW_SPEED = "nonsense"
+        check("an unknown waveform name falls back rather than crashing",
+              app._redraw_speed(True, 0)[0] == TURBO)
+        CONFIG.FAST_REDRAW_SPEED = "turbo"
+
+        CONFIG.FAST_REDRAW = False
+        check("FAST_REDRAW = False restores the old always-flash behaviour",
+              app._redraw_speed(True, 0) == (NORMAL, True))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                if hasattr(CONFIG, key):
+                    delattr(CONFIG, key)
+            else:
+                setattr(CONFIG, key, value)
+
+
 def test_app_cycle():
     print("\nfull wake cycle (app.py)")
     from badgersett import app, nws as nws_mod, weather as weather_mod
@@ -2390,6 +2446,11 @@ def test_app_cycle():
           app._reserve if app._reserve is None else len(app._reserve))
     check("the screen was drawn exactly once", displays and displays[0].updates == 1,
           displays[0].updates if displays else "no display")
+    # Nothing is known about what the panel is already showing at boot, so
+    # the first draw of a run has to be the clearing waveform.
+    check("the first draw after boot uses the full waveform",
+          displays and displays[0].speeds[-1] == sys.modules["badger2040"].UPDATE_NORMAL,
+          displays[0].speeds if displays else "no display")
     check("it slept for the configured interval", slept == [CONFIG.REFRESH_MINUTES], slept)
     check("the forecast was fetched", any("open-meteo" in u for u in calls), calls)
     check("Met Office warnings were fetched for the network's region",
@@ -2461,6 +2522,7 @@ def main():
     test_secret_screen_flow()
     test_without_breakouts()
     test_screens_without_sensor()
+    test_redraw_waveform()
     test_app_cycle()
     print("\n%s" % ("-" * 46))
     if FAILURES:
