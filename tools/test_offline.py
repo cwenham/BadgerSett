@@ -888,6 +888,27 @@ def test_metoffice():
             get=lambda url, headers=None: _rss_response(QUIET_RSS)())
         check("quiet feed yields no alerts", metoffice.fetch("se") == [])
 
+        # A dead feed must not read as an all-clear: [] means "nothing in
+        # force", None means "we do not know". Conflating them once hid a
+        # month of silently failing warnings.
+        def boom(url, headers=None):
+            raise OSError(12, "ENOMEM")
+
+        metoffice.requests = types.SimpleNamespace(get=boom)
+        check("a failed fetch returns None, not an empty all-clear",
+              metoffice.fetch("se") is None)
+
+        class Gone:
+            status_code = 503
+
+            def close(self):
+                pass
+
+        metoffice.requests = types.SimpleNamespace(get=lambda u, headers=None: Gone())
+        check("an HTTP error returns None too", metoffice.fetch("se") is None)
+        metoffice.requests = types.SimpleNamespace(
+            get=lambda url, headers=None: _rss_response(QUIET_RSS)())
+
         urls = []
 
         def capture(url, headers=None):
@@ -1710,6 +1731,25 @@ def test_runlog():
     power.RADIO_BUSY = False
     check("...and reads again afterwards", power.vsys() is not None)
 
+    # The cap has to hold without ever loading the file into RAM: on the
+    # badge a readlines() of a 96KB log raises MemoryError, the trim never
+    # happens again, and the log grows until the filesystem is full.
+    line = "2026-09-26 12:00 beat  up=1m vsys=4.100 mode=awake\n"
+    with open(path, "w") as handle:
+        handle.write(line * ((runlog_mod.MAX_BYTES // len(line)) + 200))
+    before = os.path.getsize(path)
+    runlog_mod.RunLog(enabled=True)._trim()
+    after = os.path.getsize(path)
+    check("an oversized log is trimmed", after < before, (before, after))
+    check("...to roughly half", before * 0.4 < after < before * 0.6, (before, after))
+    with open(path) as handle:
+        kept = handle.read()
+    check("...on a line boundary, with no half-line left at the front",
+          kept.startswith("2026-") and kept.endswith("\n"), kept[:30])
+    check("...and no temporary file is left behind",
+          not os.path.exists(path + ".tmp"))
+    os.remove(path)
+
     from badgersett import scan as scan_probe
     seen = []
     real_vsys = power.vsys
@@ -2282,8 +2322,13 @@ def test_app_cycle():
 
         return Response()
 
+    reserve_during_fetch = []
+
     def fake_get(url, headers=None):
         calls.append(url)
+        # The TLS arena must be released while a fetch is in flight, or
+        # HTTPS has nowhere contiguous to work on the real board.
+        reserve_during_fetch.append(app._reserve)
         if "metoffice" in url:
             return met_rss()
         if "bbci.co.uk" in url:
@@ -2318,8 +2363,10 @@ def test_app_cycle():
 
     sys.modules["badger2040"].sleep_for = fake_sleep
 
+    handover = [bytearray(app.TLS_RESERVE)]
+    app._reserve = None
     try:
-        app.run()
+        app.run(handover)
     except StopLoop:
         pass
     except Exception as exc:
@@ -2331,6 +2378,16 @@ def test_app_cycle():
         sys.modules["badger2040"].Badger2040 = original_display
 
     check("one full wake cycle completes", True)
+    # main.py must hand the arena over rather than keep a reference of its
+    # own: while anything else still points at it, freeing app's copy frees
+    # nothing and every HTTPS fetch fails with ENOMEM.
+    check("the TLS arena was taken out of the handover list", handover == [], handover)
+    check("the arena was released for every fetch",
+          reserve_during_fetch and all(r is None for r in reserve_during_fetch),
+          reserve_during_fetch)
+    check("the arena was re-claimed once fetching finished",
+          app._reserve is not None and len(app._reserve) == app.TLS_RESERVE,
+          app._reserve if app._reserve is None else len(app._reserve))
     check("the screen was drawn exactly once", displays and displays[0].updates == 1,
           displays[0].updates if displays else "no display")
     check("it slept for the configured interval", slept == [CONFIG.REFRESH_MINUTES], slept)

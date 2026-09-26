@@ -123,12 +123,13 @@ def fetch(region="se", min_colour="yellow", max_warnings=MAX_WARNINGS):
     util.log("GET", url)
     response = None
     found = []
+    failed = False
     gc.collect()
     try:
         response = requests.get(url, headers={"User-Agent": "BadgerSett/1.0"})
         if response.status_code != 200:
             util.log("met office HTTP", response.status_code)
-            return []
+            return None            # a bad response is not an all-clear
 
         # Read with a cap rather than trusting the feed to stay small.
         body = ""
@@ -166,6 +167,7 @@ def fetch(region="se", min_colour="yellow", max_warnings=MAX_WARNINGS):
         util.log("met office warnings:", [a["event"] for a in found])
     except Exception as exc:
         util.log("met office failed:", exc)
+        failed = True
     finally:
         if response is not None:
             try:
@@ -174,4 +176,6 @@ def fetch(region="se", min_colour="yellow", max_warnings=MAX_WARNINGS):
                 pass
         gc.collect()
 
-    return found
+    # None, not [] - "the fetch failed" and "no warnings are in force"
+    # must not look the same, or a dead feed reads as an all-clear.
+    return None if failed else found

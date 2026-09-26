@@ -57,15 +57,30 @@ class RunLog:
         return "----------  --:--"     # clock not set yet
 
     def _trim(self):
+        """Drop the older half, a chunk at a time.
+
+        Deliberately not readlines(): that would pull the whole 96KB file
+        into a heap that has ~100KB free and no contiguous block anywhere
+        near that big. It would raise MemoryError, the log would never be
+        trimmed again, and it would grow until the filesystem filled.
+        """
         try:
             import os
-            if os.stat(PATH)[6] <= MAX_BYTES:
+            size = os.stat(PATH)[6]
+            if size <= MAX_BYTES:
                 return
-            with open(PATH) as handle:
-                lines = handle.readlines()
-            with open(PATH, "w") as handle:
-                for line in lines[len(lines) // 2:]:
-                    handle.write(line)
+            temp = PATH + ".tmp"
+            with open(PATH, "rb") as source:
+                source.seek(size // 2)
+                source.readline()      # discard the half-line we landed in
+                with open(temp, "wb") as target:
+                    while True:
+                        chunk = source.read(512)
+                        if not chunk:
+                            break
+                        target.write(chunk)
+            os.remove(PATH)
+            os.rename(temp, PATH)
         except OSError:
             pass                       # no file yet
 

@@ -83,6 +83,13 @@ ALTITUDE_M = 10                 # Hove seafront is near enough sea level
 # --------------------------------------------------------------------------
 # Refresh & power
 # --------------------------------------------------------------------------
+# HTTPS needs one large *contiguous* block of RAM, and MicroPython's heap
+# never compacts, so main.py reserves this much while the heap is still
+# whole and hands it back around each fetch. Too small and Met Office
+# warnings and BBC headlines fail with ENOMEM even with plenty free; too
+# large and the rest of the app runs short. 48 works on a Badger 2040 W.
+TLS_RESERVE_KB = 48
+
 REFRESH_MINUTES = 30            # how often to fetch weather, warnings and news
 SENSOR_ONLY_ON_BUTTON = True    # a button wake re-reads the BME688 but skips WiFi
 

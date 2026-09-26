@@ -174,6 +174,12 @@ forecast on every press instead.
 
 ## How the alerting works
 
+A failed warnings fetch is not an all-clear. `metoffice.fetch()` returns
+`None` when it could not reach the feed and `[]` when the feed genuinely
+carries no warnings, and the runtime log records the difference. Treating
+the two alike is how a month of silently failing warnings could look like
+a quiet month.
+
 Alerts carry a level: **1** notice, **2** warning, **3** severe. Each one
 has a stable key, and the buzzer only fires when a key is *new* or has
 *escalated*. Re-running every 30 minutes will not buzz you every 30
@@ -265,19 +271,50 @@ fetch entirely and saves the radio time.
 The BBC's terms for feed reuse are linked from each feed's own
 `<copyright>` element. The news view credits them.
 
-## Memory: why the PNG decoder is built on demand
+## Memory: the TLS reserve
 
 The RP2040 has ~190KB of usable heap, and a TLS handshake needs a large
-*contiguous* block — about 50KB. `pngdec.PNG()` allocates roughly 48KB
-of its own. Holding a decoder for the life of the UI object leaves the
-largest free block at ~56KB, which is right on the edge: adding one more
-module was enough to turn both HTTPS feeds into `ENOMEM`.
+*contiguous* block. MicroPython's garbage collector does not compact, so
+`gc.collect()` cannot help once the heap is in pieces — **free memory is
+not the number that matters, the largest single block is**. The badge
+can sit at 107KB free with a largest block of 14KB, and in that state
+every HTTPS fetch fails with `ENOMEM` while plain-HTTP weather carries
+on working. Both feeds that matter are HTTPS: Met Office warnings and
+BBC headlines.
 
-MicroPython's garbage collector does not compact, so `gc.collect()`
-cannot fix that by itself — the fix is to not hold the allocation.
-`ui.UI` therefore builds the PNG decoder only while drawing the photo
-and releases it immediately. If you add anything else that grabs tens of
-kilobytes, do the same, or the symptom will show up somewhere unrelated.
+Importing the package and building the display is enough to chop the
+heap up that badly, and it does not take much to tip it over — adding
+one branch to `app.py` and a handful of lines to `ui.py` once did it.
+
+So `main.py` claims a 48KB block *before* it imports anything else,
+while the heap is still whole, and hands it to `app.run()` in a list it
+then drops:
+
+```python
+_handover = [bytearray(48 * 1024)]      # no reference kept here
+from badgersett import app
+app.run(_handover)                      # run() pops it out
+```
+
+The handover matters. Passing the buffer directly leaves `main.py`'s own
+global pointing at it, and then freeing `app._reserve` frees nothing —
+the symptom is identical to having no reserve at all. `tools/test_offline.py`
+checks for exactly that.
+
+`app.py` releases the block around each network refresh and re-claims it
+afterwards. The re-claim is expected to fail from the second refresh on,
+because the first HTTPS session keeps some of what was freed; measured
+on a Badger 2040 W the largest block then settles at about 23KB, which
+is still comfortably enough. That is why the failure is logged once and
+not treated as an error.
+
+`TLS_RESERVE_KB` tunes the size. If you add anything that grabs tens of
+kilobytes and holds it, expect the symptom to surface somewhere
+unrelated — an HTTPS feed quietly returning nothing.
+
+For the same reason the photo is stored pre-packed as a framebuffer
+(`.fb`) and blitted, rather than decoded: `pngdec.PNG()` wanted ~48KB of
+its own, and holding it was enough to wedge the board.
 
 ## Multiple WiFi networks, and where they are
 
@@ -494,7 +531,23 @@ while the radio is off): about 4.8V on USB, tracking the cell on battery.
 `runtime.log` gets a line on every boot and then every
 `RUNTIME_LOG_MINUTES`, each carrying its own uptime and voltage, so the
 last line before the cutoff records how long it lasted even if the file
-has been trimmed. It is capped at ~96KB, about nine days of beats.
+has been trimmed. It is capped at ~96KB, about nine days of beats, and
+trimmed by streaming rather than by reading the file in — at that size,
+reading it in would exhaust the heap.
+
+Each refresh logs what every feed actually returned, not just the
+forecast:
+
+```
+2026-09-26 16:31 fetch up=12m vsys=4.88 mode=awake ok=1 news=4 warn=0 where=Home
+```
+
+`ok` is the forecast, `news` the headline count, and `warn` the number
+of Met Office warnings — or `?` if that fetch failed. The three can fail
+independently: the forecast is plain HTTP and the other two are HTTPS,
+so a heap too fragmented for TLS takes out warnings and headlines while
+the forecast keeps updating. Without these fields the log said `ok=1`
+through all of it.
 
 ## Configuration
 

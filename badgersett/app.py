@@ -276,12 +276,14 @@ def _refresh_network():
     others. `network` is the entry we actually joined, which carries the
     location the rest of the data belongs to.
     """
+    _release_reserve()
     networks = net.networks_from_config(config)
     link, active = net.connect_best(networks,
                                     getattr(config, "WIFI_COUNTRY", "GB"),
                                     getattr(config, "WIFI_TIMEOUT", 25),
                                     getattr(config, "WIFI_MAX_ATTEMPTS", 3))
     if not link:
+        _hold_reserve()
         return None, None, None, None
 
     # Time first, while the link is definitely up. NTP gives UTC; the
@@ -311,12 +313,60 @@ def _refresh_network():
     finally:
         net.disconnect()
         gc.collect()
+        _hold_reserve()
 
     return forecast, official, headlines, active
 
 
-def run():
+# The RP2040 heap fragments as modules import and objects are built, and
+# MicroPython's GC never compacts. TLS needs one large *contiguous* block
+# for its buffers, so by the time a refresh comes round there can be 100KB
+# free in pieces too small to start an HTTPS session - and then Met Office
+# warnings and BBC headlines both fail while plain-HTTP weather still
+# works. main.py claims this block while the heap is still pristine; we
+# hand it back for the duration of the fetches and take it again after.
+TLS_RESERVE = int(getattr(config, "TLS_RESERVE_KB", 48)) * 1024
+_reserve = None
+
+
+_reserve_warned = False
+
+
+def _hold_reserve():
+    """Re-claim the TLS arena.
+
+    Expected to fail from the second refresh onwards: the first HTTPS
+    session keeps some of what the arena freed. That is fine - measured
+    on a Badger 2040 W the largest block then settles around 23KB, which
+    is still enough for TLS. Only the first attempt is worth a log line.
+    """
+    global _reserve, _reserve_warned
+    if _reserve is None:
+        gc.collect()
+        try:
+            _reserve = bytearray(TLS_RESERVE)
+        except MemoryError:
+            if not _reserve_warned:
+                _reserve_warned = True
+                util.log("TLS reserve not re-claimed; "
+                         "HTTPS now runs on whatever the heap has left")
+
+
+def _release_reserve():
+    """Free the arena so TLS has somewhere contiguous to work."""
+    global _reserve
+    _reserve = None
+    gc.collect()
+
+
+def run(handover=None):
     global _last_attempt
+    global _reserve
+    # Take the arena out of the list main.py passed, so that list is the
+    # only other place it could have been referenced - and now is not.
+    if handover:
+        _reserve = handover.pop()
+
     display = badger2040.Badger2040()
     display.set_update_speed(badger2040.UPDATE_NORMAL)
 
@@ -478,7 +528,14 @@ def run():
             display.led(64)
             _last_attempt = time.ticks_ms()
             fresh, official, fresh_news, active = _refresh_network()
+            # Record each feed, not just the forecast. The two HTTPS feeds
+            # can fail on their own - a fragmented heap starves TLS while
+            # plain-HTTP weather carries on - and without this the log said
+            # "ok=1" while warnings and headlines were quietly coming back
+            # empty.
             log.write("fetch", ok=int(fresh is not None),
+                      news=len(fresh_news or []),
+                      warn=("?" if official is None else len(official)),
                       where=(active or {}).get("label", "none").replace(" ", "_"))
             display.led(0)
             online = fresh is not None
