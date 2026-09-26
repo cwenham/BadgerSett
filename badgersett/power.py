@@ -24,6 +24,24 @@ RADIO_BUSY = False
 USB_VSYS_V = 4.5
 
 
+def radio_powered():
+    """Whether the CYW43 has power. See net.radio_powered()."""
+    try:
+        from . import net
+        return net.radio_powered()
+    except Exception:
+        return None
+
+
+def radio_off():
+    """Cut power to the CYW43. See net.radio_off()."""
+    try:
+        from . import net
+        net.radio_off()
+    except Exception as exc:
+        util.log("radio power-down:", exc)
+
+
 def on_usb():
     """True when running from USB, False on battery.
 
@@ -37,14 +55,32 @@ def on_usb():
     the voltage directly. This only decides whether "auto" mode stays
     awake, so a wrong answer costs power, not a battery.
     """
-    try:
-        return bool(machine.Pin(_USB_PIN, machine.Pin.IN).value())
-    except Exception as exc:
-        util.log("VBUS sense unavailable (%s); trying VSYS" % exc)
+    # WL_GPIO2 is a pin on the CYW43, not on the RP2040. Reading it powers
+    # the wireless chip up - and leaves it up, drawing current until
+    # something deinits it. An earlier version used it first because it
+    # "disturbs nothing"; measured on the board, it disturbs the most
+    # expensive thing there is. So it is only free when the radio is
+    # already running, and VSYS answers the same question when it is not.
+    if radio_powered():
+        try:
+            return bool(machine.Pin(_USB_PIN, machine.Pin.IN).value())
+        except Exception as exc:
+            util.log("VBUS sense unavailable (%s); trying VSYS" % exc)
     volts = vsys()
     if volts is not None:
         return volts > USB_VSYS_V
-    return True
+    # VSYS is blocked (the radio holds the shared SPI pins) and the radio
+    # is not up to be asked. Power it just long enough for the read, then
+    # put it back exactly as we found it.
+    was_powered = radio_powered()
+    try:
+        return bool(machine.Pin(_USB_PIN, machine.Pin.IN).value())
+    except Exception as exc:
+        util.log("VBUS sense unavailable (%s); assuming USB" % exc)
+        return True
+    finally:
+        if not was_powered:
+            radio_off()
 
 
 def vsys(samples=16):

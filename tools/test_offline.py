@@ -201,6 +201,11 @@ def install_fakes():
 
         def __init__(self, name, mode=None, *a, **kw):
             self.name = name
+            # WL_GPIO2 is on the CYW43, so asking for it powers the chip up
+            # and leaves it up. That is the whole point of the pin being
+            # expensive, so the fake has to do it too.
+            if name == "WL_GPIO2":
+                sys.modules["network"].WLAN.powered = True
 
         def value(self, v=None):
             return _Pin.usb_present if self.name == "WL_GPIO2" else 0
@@ -1249,13 +1254,28 @@ def test_power_detection():
     WLAN = sys.modules["network"].WLAN
     WLAN.is_active = False
 
-    # The VBUS pin is the primary signal: one pin read, nothing disturbed.
+    # VSYS is the primary signal. The VBUS pin gives the same answer but
+    # lives on the CYW43, so reading it powers the radio - fine when the
+    # radio is already up, wasteful when it is not.
+    WLAN.powered = False
     machine_mod.Pin.usb_present = 1
     set_supply(4.8)
-    check("VBUS high reads as USB", power.on_usb() is True)
+    check("USB is detected", power.on_usb() is True)
+    check("...without powering the radio to find out",
+          WLAN.powered is False, WLAN.powered)
     machine_mod.Pin.usb_present = 0
     set_supply(3.9)
-    check("VBUS low reads as battery", power.on_usb() is False)
+    check("battery is detected", power.on_usb() is False)
+    check("...also without powering the radio",
+          WLAN.powered is False, WLAN.powered)
+
+    # When the radio is already running the pin is free, and preferred.
+    WLAN.powered = True
+    machine_mod.Pin.usb_present = 1
+    set_supply(3.9)                      # VSYS would say battery; the pin wins
+    check("with the radio already up, the VBUS pin is used",
+          power.on_usb() is True)
+    WLAN.powered = False
 
     # VSYS is only the fallback, for when the pin cannot be read at all.
     broken = machine_mod.Pin

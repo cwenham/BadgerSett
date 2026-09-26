@@ -542,6 +542,15 @@ it powered too. Both scanners used to do exactly that, so every visit to
 the secret screen left the radio running until the next refresh happened
 to deinit it. They now restore whatever power state they found.
 
+The subtlest case was USB detection. `WL_GPIO2` is the Pico W's VBUS
+sense — and it is a pin *on the CYW43*, so reading it powers the whole
+wireless chip up and leaves it up. This file used to call it the cheap
+option because it is "a single pin read that disturbs nothing"; measured,
+it disturbs the most expensive thing on the board. `power.on_usb()` now
+reads VSYS instead, and only uses the pin when the radio happens to be
+running already — or, if VSYS is blocked because the radio holds the
+shared SPI pins, powers it for the read and puts it back.
+
 Asleep, the badge sets an RTC alarm and cuts its own power — which also
 cuts the 3.3V rail to the BME688. `REFRESH_MINUTES` is then the main
 lever: the WiFi radio dominates consumption.
